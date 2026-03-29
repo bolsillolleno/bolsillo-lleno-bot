@@ -1,174 +1,143 @@
-const express = require("express");
-const axios = require("axios");
-const admin = require("firebase-admin");
-const Anthropic = require("@anthropic-ai/sdk");
+/**
+ * ╔═══════════════════════════════════════════════════════════════╗
+ * ║  BOL$ILLO LLENO — Railway Server                              ║
+ * ║                                                               ║
+ * ║  Variables de entorno en Railway (Settings → Variables):      ║
+ * ║  ANTHROPIC_API_KEY   → sk-ant-api03-...                       ║
+ * ║  FIREBASE_URL        → https://bolsillolleno-5d1f8-default-   ║
+ * ║                        rtdb.firebaseio.com                    ║
+ * ║  FIREBASE_SECRET     → Database Secret de Firebase            ║
+ * ║  WEBHOOK_TOKEN       → bolsillin2026                          ║
+ * ║  PORT                → Railway lo asigna automáticamente      ║
+ * ╚═══════════════════════════════════════════════════════════════╝
+ */
 
-const app = express();
-app.use(express.json());
+const express = require('express');
+const app     = express();
+const PORT    = process.env.PORT || 8080;
 
-// ─── Firebase Admin Init ───────────────────────────────────────────────────
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: process.env.FIREBASE_DATABASE_URL,
+// ── Middleware ──────────────────────────────────────────────────
+app.use(express.json({ limit: '10mb' }));
+
+// CORS — permite llamadas desde el admin (GitHub Pages / cualquier origen)
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin',  '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
 });
-const db = admin.database();
 
-// ─── Anthropic Init ────────────────────────────────────────────────────────
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// ── Health check ────────────────────────────────────────────────
+app.get('/', (req, res) => {
+  res.json({
+    ok:       true,
+    servicio: 'Bol$illo Lleno API',
+    version:  '3.0',
+    ts:       new Date().toISOString(),
+    endpoints: [
+      'POST /api/claude  → Proxy de Anthropic (bot IA)',
+      'GET  /health      → Health check',
+    ],
+  });
+});
 
-// ─── Personalidad de Bol$illin ─────────────────────────────────────────────
-const BOLSILLIN_SYSTEM_PROMPT = `Eres Bol$illin, el asistente oficial y mascota de Bolsillo Lleno Sorteos Bendecidos.
-Eres un parcero emocionante, carismático y súper vendedor. Tu misión es motivar a la gente a comprar sus numéritos y ganar premios increíbles.
+app.get('/health', (req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString() });
+});
 
-PERSONALIDAD:
-- Hablas como un parcero colombiano auténtico (usas "parce", "bacano", "qué más", "ome", "llave", etc.)
-- Usas emojis con frecuencia 💰🔥🤑✨🎉
-- Siempre estás emocionado y con energía positiva
-- Creas urgencia constantemente ("los números se están agotando", "quedan poquitos", "no te quedes por fuera")
-- Siempre terminas motivando a comprar un numérito
+// ══════════════════════════════════════════════════════════════════
+// POST /api/claude
+// Proxy hacia Anthropic API — el admin llama aquí con el contexto
+// y Railway reenvía usando la API key del servidor (no expuesta al browser)
+//
+// Body esperado:
+// {
+//   messages: [{role, content}],   ← historial de conversación
+//   system:   "...",               ← system prompt (opcional)
+//   max_tokens: 400,               ← opcional, default 400
+//   model: "claude-haiku-..."      ← opcional, se puede fijar aquí
+// }
+//
+// Response:
+// { ok: true, text: "respuesta del bot" }
+// { ok: false, error: "mensaje de error" }
+// ══════════════════════════════════════════════════════════════════
+app.post('/api/claude', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
 
-REGLAS:
-- Nunca digas que eres una IA o bot — eres Bol$illin, el parcero de Bolsillo Lleno
-- Si alguien pregunta por números disponibles, diles que le escriban directamente al admin
-- Si no sabes algo, di que vas a consultar con Camilo (el dueño)
-- Máximo 3-4 líneas por respuesta, directo al grano
-- Siempre cierra con una frase que invite a comprar o a preguntar por numéritos
-
-CONTEXTO DEL NEGOCIO:
-- Se venden numéritos para sorteos con 5 formas de ganar
-- Hay combos disponibles
-- Los pagos se hacen por Nequi
-- El grupo de WhatsApp es el canal principal`;
-
-// ─── Historial de conversaciones en memoria ────────────────────────────────
-const conversationHistory = {};
-
-// ─── Webhook Verificación Meta ─────────────────────────────────────────────
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === process.env.WEBHOOK_VERIFY_TOKEN) {
-    console.log("✅ Webhook verificado correctamente");
-    res.status(200).send(challenge);
-  } else {
-    console.error("❌ Token de verificación incorrecto");
-    res.sendStatus(403);
+  if (!apiKey) {
+    return res.status(500).json({
+      ok:    false,
+      error: 'ANTHROPIC_API_KEY no configurada en Railway'
+    });
   }
-});
 
-// ─── Webhook Mensajes Entrantes ────────────────────────────────────────────
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // Responder rápido a Meta
+  const { messages, system, max_tokens, model } = req.body;
+
+  if (!messages || !Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ ok: false, error: 'Se requiere "messages" como array' });
+  }
+
+  // Filtrar mensajes vacíos y garantizar alternancia de roles
+  const mensajesFiltrados = messages
+    .filter(m => m && m.role && m.content && String(m.content).trim())
+    .map(m => ({ role: m.role, content: String(m.content) }));
+
+  if (mensajesFiltrados.length === 0) {
+    return res.status(400).json({ ok: false, error: 'No hay mensajes válidos' });
+  }
 
   try {
-    const body = req.body;
-    if (body.object !== "whatsapp_business_account") return;
+    const payload = {
+      model:      model || 'claude-haiku-4-5-20251001',
+      max_tokens: max_tokens || 400,
+      messages:   mensajesFiltrados,
+    };
+    if (system) payload.system = system;
 
-    const entry = body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const messages = value?.messages;
-
-    if (!messages || messages.length === 0) return;
-
-    const message = messages[0];
-    const from = message.from; // Número del usuario
-    const messageText = message.text?.body;
-
-    if (!messageText) return; // Ignorar mensajes que no son texto
-
-    console.log(`📩 Mensaje de ${from}: ${messageText}`);
-
-    // Guardar mensaje en Firebase
-    await db.ref(`/mensajes/${from}`).push({
-      de: "usuario",
-      texto: messageText,
-      timestamp: Date.now(),
+    const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method:  'POST',
+      headers: {
+        'Content-Type':      'application/json',
+        'x-api-key':         apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(payload),
     });
 
-    // Mantener historial de conversación (máx 10 turnos)
-    if (!conversationHistory[from]) conversationHistory[from] = [];
-    conversationHistory[from].push({ role: "user", content: messageText });
-    if (conversationHistory[from].length > 20) {
-      conversationHistory[from] = conversationHistory[from].slice(-20);
+    const data = await claudeRes.json();
+
+    if (!claudeRes.ok) {
+      console.error('Anthropic error:', claudeRes.status, data);
+      return res.status(claudeRes.status).json({
+        ok:    false,
+        error: data?.error?.message || 'Error de Anthropic: ' + claudeRes.status,
+      });
     }
 
-    // Obtener knowledge base de Firebase
-    let kbExtra = "";
-    try {
-      const kbSnap = await db.ref("/wa_kb").once("value");
-      const kb = kbSnap.val();
-      if (kb) kbExtra = `\n\nINFORMACIÓN ADICIONAL DEL NEGOCIO:\n${kb}`;
-    } catch (e) {
-      console.log("No hay knowledge base en Firebase");
-    }
+    const text = data?.content?.[0]?.text || '';
+    res.json({ ok: true, text, usage: data.usage });
 
-    // Verificar si el bot está activo
-    const botCfgSnap = await db.ref("/wa_botcfg/activo").once("value");
-    const botActivo = botCfgSnap.val();
-    if (botActivo === false) {
-      console.log("🤖 Bot desactivado, no se responde");
-      return;
-    }
-
-    // Llamar a Claude (Bol$illin)
-    const claudeResponse = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 300,
-      system: BOLSILLIN_SYSTEM_PROMPT + kbExtra,
-      messages: conversationHistory[from],
-    });
-
-    const botReply = claudeResponse.content[0].text;
-
-    // Guardar respuesta del bot en Firebase
-    await db.ref(`/mensajes/${from}`).push({
-      de: "bot",
-      texto: botReply,
-      timestamp: Date.now(),
-    });
-
-    // Agregar respuesta al historial
-    conversationHistory[from].push({ role: "assistant", content: botReply });
-
-    // Enviar respuesta por WhatsApp
-    await sendWhatsAppMessage(from, botReply);
-    console.log(`✅ Respuesta enviada a ${from}`);
-  } catch (error) {
-    console.error("❌ Error procesando mensaje:", error.message);
+  } catch (err) {
+    console.error('Error en /api/claude:', err.message);
+    res.status(500).json({ ok: false, error: 'Error de servidor: ' + err.message });
   }
 });
 
-// ─── Función enviar mensaje WhatsApp ──────────────────────────────────────
-async function sendWhatsAppMessage(to, text) {
-  const url = `https://graph.facebook.com/v18.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`;
-  await axios.post(
-    url,
-    {
-      messaging_product: "whatsapp",
-      to,
-      type: "text",
-      text: { body: text },
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-    }
-  );
-}
+// ══════════════════════════════════════════════════════════════════
+// POST /api/claude-stream (opcional — para respuestas más rápidas)
+// Misma funcionalidad pero con streaming si se necesita en el futuro
+// ══════════════════════════════════════════════════════════════════
 
-// ─── Endpoint de salud ─────────────────────────────────────────────────────
-app.get("/", (req, res) => {
-  res.json({ status: "✅ Bol$illin está activo y listo para vender 🔥" });
+// ── 404 ─────────────────────────────────────────────────────────
+app.use((req, res) => {
+  res.status(404).json({ ok: false, error: 'Endpoint no encontrado' });
 });
 
-// ─── Iniciar servidor ──────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
+// ── Start ────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor de Bol$illin corriendo en puerto ${PORT}`);
+  console.log(`✅ Bol$illo Lleno API corriendo en puerto ${PORT}`);
+  console.log(`   ANTHROPIC_API_KEY: ${process.env.ANTHROPIC_API_KEY ? '✅ configurada' : '❌ FALTA'}`);
+  console.log(`   FIREBASE_URL:      ${process.env.FIREBASE_URL      ? '✅ configurada' : '⚠️  no configurada'}`);
 });
