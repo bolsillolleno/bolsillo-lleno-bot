@@ -1,9 +1,0 @@
-# Variables de entorno - NUNCA subir a GitHub
-.env
-
-# Dependencias (se instalan automáticamente en Railway)
-node_modules/
-
-# Archivos del sistema
-.DS_Store
-Thumbs.db
