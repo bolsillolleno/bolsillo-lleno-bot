@@ -1,5 +1,5 @@
 const IntentDetector = require('./intents');
-const SegmentacionService = require('./segmentacion');
+const SegmentacionService = require('./segmentacion.js');
 const SorteosService = require('./sorteos');
 const Responses = require('./responses');
 const antiBan = require('./antiBan');
