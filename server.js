@@ -3,16 +3,16 @@ const http    = require('http');
 const { Server } = require('socket.io');
 const QRCode  = require('qrcode');
 
-// ✅ Rutas corregidas — todos los archivos están en la raíz del proyecto
 const WhatsAppConnection = require('./connection');
 const FirebaseService    = require('./firebaseServices');
 
-const PORT = process.env.PORT || 3030;
+// ✅ IMPORTANTE: usar el puerto de Railway
+const PORT = process.env.PORT || 8080;
 
 const app    = express();
 const server = http.createServer(app);
 
-// ── Socket.io con CORS abierto (GitHub Pages / panel externo) ──
+// ── Socket.io ──
 const io = new Server(server, {
   cors: {
     origin: '*',
@@ -24,6 +24,7 @@ const io = new Server(server, {
 const state = {
   connection: 'disconnected',
   qrCode: null,
+  qrImage: null, // ✅ NUEVO
   stats: { received: 0, sent: 0, errors: 0 }
 };
 
@@ -31,7 +32,7 @@ const state = {
 const firebase    = new FirebaseService();
 const waConnection = new WhatsAppConnection(io, state, firebase);
 
-// ── Rutas HTTP ──
+// ── RUTA PRINCIPAL ──
 app.get('/', (req, res) => {
   res.json({
     status:     'ok',
@@ -41,6 +42,36 @@ app.get('/', (req, res) => {
   });
 });
 
+// ── NUEVA RUTA PARA VER EL QR ──
+app.get('/qr', async (req, res) => {
+  try {
+    if (!state.qrCode) {
+      return res.send(`
+        <h2>⏳ Esperando QR...</h2>
+        <p>Recarga en unos segundos</p>
+      `);
+    }
+
+    const qrImage = await QRCode.toDataURL(state.qrCode);
+
+    res.send(`
+      <html>
+        <head>
+          <title>QR WhatsApp</title>
+        </head>
+        <body style="text-align:center;font-family:sans-serif;">
+          <h2>📲 Escanea el QR</h2>
+          <img src="${qrImage}" />
+          <p>Abre WhatsApp > Dispositivos vinculados</p>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    res.send('Error generando QR');
+  }
+});
+
+// ── HEALTH ──
 app.get('/health', (req, res) => {
   res.json({
     status:     'ok',
@@ -50,40 +81,36 @@ app.get('/health', (req, res) => {
   });
 });
 
-// ── Socket.io ──
+// ── SOCKET ──
 io.on('connection', (socket) => {
-  console.log('🖥️  Panel conectado:', socket.id);
+  console.log('🖥️ Panel conectado:', socket.id);
 
-  // Enviar estado actual al nuevo cliente
   socket.emit('connection-status', state.connection);
 
-  // Re-emitir QR si ya está esperando escaneo
   if (state.qrCode && state.connection === 'qr') {
     QRCode.toDataURL(state.qrCode, { scale: 8 }, (err, url) => {
       if (!err) socket.emit('qr-code', url);
     });
   }
 
-  // Panel pide reconectar WhatsApp
   socket.on('reconnect-wa', () => {
-    console.log('🔄 Reconexión manual solicitada');
+    console.log('🔄 Reconexión manual');
     waConnection.connect();
   });
 
-  // Panel pide desconectar WhatsApp
   socket.on('disconnect-wa', () => {
-    console.log('🔌 Desconexión manual solicitada');
+    console.log('🔌 Desconexión manual');
     waConnection.disconnect();
   });
 
   socket.on('disconnect', () => {
-    console.log('🖥️  Panel desconectado:', socket.id);
+    console.log('🖥️ Panel desconectado:', socket.id);
   });
 });
 
-// ── Arranque ──
+// ── ARRANQUE ──
 server.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+  console.log(`🚀 Servidor en puerto ${PORT}`);
   console.log(`📡 Socket.io listo`);
   waConnection.connect();
 });
