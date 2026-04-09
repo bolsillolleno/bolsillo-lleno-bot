@@ -1,9 +1,9 @@
 const IntentDetector = require('./intents');
-const SegmentacionService = require('../services/segmentacion');
-const SorteosService = require('../services/sorteos');
+const SegmentacionService = require('./segmentacion');
+const SorteosService = require('./sorteos');
 const Responses = require('./responses');
-const antiBan = require('../utils/antiBan');
-const { humanDelay, typingSimulation } = require('../utils/delay');
+const antiBan = require('./antiBan');
+const { humanDelay, typingSimulation } = require('./delay');
 
 class BotLogic {
   constructor(sock, state, firebase, io) {
