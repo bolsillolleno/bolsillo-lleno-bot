@@ -113,13 +113,18 @@ class WhatsAppConnection {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        this.state.qrCode    = qr;
-        this.state.connection = 'qr';
-        QRCode.toDataURL(qr, (err, url) => {
-          if (!err) this.io.emit('qr-code', url);
-        });
-      }
+  console.log('📲 QR generado');
 
+  this.state.qrCode     = qr;
+  this.state.connection = 'qr';
+
+  // 🔥 ESTA LÍNEA FALTABA
+  this.io.emit('connection-status', 'qr');
+
+  QRCode.toDataURL(qr, (err, url) => {
+    if (!err) this.io.emit('qr-code', url);
+  });
+}
       if (connection === 'close') {
         const code      = lastDisconnect?.error?.output?.statusCode;
         const loggedOut = code === DisconnectReason.loggedOut;
