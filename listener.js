@@ -1,4 +1,4 @@
-const BotLogic = require('../bot/logic');
+const BotLogic = require('./logic');
 
 class MessageListener {
   constructor(sock, state, firebase, io) {
