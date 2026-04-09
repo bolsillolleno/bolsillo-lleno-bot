@@ -75,88 +75,37 @@ class WhatsAppConnection {
     this.retryCount = 0;
   }
 
-  async connect() {
-    try {
-      // 1. Restaurar sesión desde Firebase antes de leer auth local
-      await downloadSession(this.firebase);
+async connect() {
+  try {
 
-      const { state: authState, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-      const { version } = await fetchLatestBaileysVersion();
-
-      this.state.connection = 'connecting';
-      this.io.emit('connection-status', 'connecting');
-
-      this.sock = makeWASocket({
-        version,
-        logger: P({ level: 'silent' }),
-        printQRInTerminal: false,
-        auth: authState,
-        browser: ['Bol$illoBot', 'Chrome', '1.0'],
-        generateHighQualityLinkPreview: true
-      });
-
-      this.setupListeners(saveCreds);
-    } catch (err) {
-      console.error('❌ Error conexión:', err);
-      this.handleReconnect();
+    // 🧹 BORRAR sesión SIEMPRE (para forzar QR)
+    if (fs.existsSync(SESSION_DIR)) {
+      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+      console.log('🧹 Sesión eliminada para generar QR limpio');
     }
-  }
 
-  setupListeners(saveCreds) {
-    // Guardar credenciales local Y subir a Firebase cada vez que cambian
-    this.sock.ev.on('creds.update', async () => {
-      await saveCreds();
-      await uploadSession(this.firebase);
+    const { state: authState, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
+    const { version } = await fetchLatestBaileysVersion();
+
+    this.state.connection = 'connecting';
+    this.io.emit('connection-status', 'connecting');
+
+    this.sock = makeWASocket({
+      version,
+      logger: P({ level: 'silent' }),
+      printQRInTerminal: false,
+      auth: authState,
+      browser: ['Bol$illoBot', 'Chrome', '1.0'],
+      generateHighQualityLinkPreview: true
     });
 
-    this.sock.ev.on('connection.update', (update) => {
-      const { connection, lastDisconnect, qr } = update;
+    this.setupListeners(saveCreds);
 
-      if (qr) {
-  console.log('📲 QR generado');
-
-  this.state.qrCode     = qr;
-  this.state.connection = 'qr';
-
-  // 🔥 ESTA LÍNEA FALTABA
-  this.io.emit('connection-status', 'qr');
-
-  QRCode.toDataURL(qr, (err, url) => {
-    if (!err) this.io.emit('qr-code', url);
-  });
+  } catch (err) {
+    console.error('❌ Error conexión:', err);
+    this.handleReconnect();
+  }
 }
-      if (connection === 'close') {
-        const code      = lastDisconnect?.error?.output?.statusCode;
-        const loggedOut = code === DisconnectReason.loggedOut;
-
-        if (loggedOut) {
-          console.log('🔴 Sesión cerrada — borrando sesión local y de Firebase');
-          this.clearSession();
-          this.state.connection = 'disconnected';
-          this.io.emit('connection-status', 'disconnected');
-        } else {
-          this.handleReconnect();
-        }
-      } else if (connection === 'open') {
-        this.state.connection = 'connected';
-        this.state.qrCode    = null;
-        this.retryCount      = 0;
-        this.io.emit('connection-status', 'connected');
-        console.log('✅ WhatsApp Conectado');
-      }
-    });
-
-    // Delegar mensajes al listener — mismo directorio raíz ✅
-    const MessageListener = require('./listener');
-    new MessageListener(this.sock, this.state, this.firebase, this.io);
-  }
-
-  handleReconnect() {
-    this.retryCount++;
-    const delay = Math.min(1000 * 2 ** this.retryCount, 30000);
-    console.log(`🔄 Reconectando en ${delay / 1000}s... (intento ${this.retryCount})`);
-    setTimeout(() => this.connect(), delay);
-  }
 
   async sendMessage(jid, text, options = {}) {
     if (!this.sock || this.state.connection !== 'connected') {
