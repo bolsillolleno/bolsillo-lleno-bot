@@ -1,16 +1,18 @@
 const express = require('express');
-const http = require('http');
+const http    = require('http');
 const { Server } = require('socket.io');
-const QRCode = require('qrcode');
-const WhatsAppConnection = require('./src/whatsapp/connection');
-const FirebaseService = require('./src/services/firebaseServices');
+const QRCode  = require('qrcode');
+
+// ✅ Rutas corregidas — todos los archivos están en la raíz del proyecto
+const WhatsAppConnection = require('./connection');
+const FirebaseService    = require('./firebaseServices');
 
 const PORT = process.env.PORT || 3030;
 
-const app = express();
+const app    = express();
 const server = http.createServer(app);
 
-// ── Socket.io con CORS abierto (GitHub Pages) ──
+// ── Socket.io con CORS abierto (GitHub Pages / panel externo) ──
 const io = new Server(server, {
   cors: {
     origin: '*',
@@ -26,25 +28,25 @@ const state = {
 };
 
 // ── Servicios ──
-const firebase = new FirebaseService();
+const firebase    = new FirebaseService();
 const waConnection = new WhatsAppConnection(io, state, firebase);
 
 // ── Rutas HTTP ──
 app.get('/', (req, res) => {
   res.json({
-    status: 'ok',
-    service: 'Bol$illo Lleno — WA Bot',
+    status:     'ok',
+    service:    'Bol$illo Lleno — WA Bot',
     connection: state.connection,
-    uptime: Math.floor(process.uptime()) + 's'
+    uptime:     Math.floor(process.uptime()) + 's'
   });
 });
 
 app.get('/health', (req, res) => {
   res.json({
-    status: 'ok',
+    status:     'ok',
     connection: state.connection,
-    uptime: process.uptime(),
-    stats: state.stats
+    uptime:     process.uptime(),
+    stats:      state.stats
   });
 });
 
