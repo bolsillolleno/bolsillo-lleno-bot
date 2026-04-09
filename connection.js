@@ -62,6 +62,8 @@ class WhatsAppConnection {
     });
 
     this.sock.ev.on('connection.update', (update) => {
+console.log('🧠 UPDATE:', update);
+
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
