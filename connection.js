@@ -89,7 +89,7 @@ class WhatsAppConnection {
       this.sock = makeWASocket({
         version,
         logger: P({ level: 'silent' }),
-        printQRInTerminal: true,
+        printQRInTerminal: false,
         auth: authState,
         browser: ['Bol$illoBot', 'Chrome', '1.0'],
         generateHighQualityLinkPreview: true
