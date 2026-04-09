@@ -36,12 +36,17 @@ class WhatsAppConnection {
       this.io.emit('connection-status', 'connecting');
 
       this.sock = makeWASocket({
-        version,
-        logger: P({ level: 'silent' }),
-        printQRInTerminal: false,
-        auth: authState,
-        browser: ['Bol$illoBot', 'Chrome', '1.0']
-      });
+  version,
+  logger: P({ level: 'silent' }),
+  printQRInTerminal: true, // 👈 IMPORTANTE
+  auth: authState,
+  browser: ['Bol$illoBot', 'Chrome', '1.0'],
+  connectTimeoutMs: 60000, // 👈 clave
+  defaultQueryTimeoutMs: 0,
+  keepAliveIntervalMs: 10000,
+  emitOwnEvents: true,
+  fireInitQueries: true
+});
 
       this.setupListeners(saveCreds);
 
