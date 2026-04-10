@@ -1,185 +1,161 @@
 const { DateTime } = require('luxon');
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Responses — Bol$illo Lleno x5
+//  Claude genera respuestas naturales en tiempo real
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+
 class Responses {
   constructor(firebase) {
     this.firebase = firebase;
+    // Historial de conversación por JID (últimos 10 mensajes)
+    this.historiales = new Map();
   }
 
-  bienvenida({ sorteo, perfil }) {
-    const esCliente = perfil.tipo === 'CLIENTE';
-    const saludo = esCliente ? '¡Qué alegría verte de nuevo!' : '¡Bienvenido!';
-    
-    return `👋 *${saludo} ${perfil.data?.nombre?.split(' ')[0] || 'amigo'}!*
+  // ─────────────────────────────────────────────
+  //  Construir system prompt con contexto completo
+  // ─────────────────────────────────────────────
+  buildSystemPrompt(sorteo, perfil, isGroup) {
+    const precio = parseInt(sorteo.precioNumero).toLocaleString('es-CO');
+    const premio = parseInt(sorteo.premioMayor).toLocaleString('es-CO');
+    const cierre = DateTime.fromISO(sorteo.date)
+      .setZone('America/Bogota')
+      .toFormat("dd 'de' MMMM 'a las' hh:mm a", { locale: 'es' });
 
-🍀 *Bol$illo Lleno x5* — Donde un número te da *5 oportunidades de ganar*
+    return `Eres el bot de ventas de *Bol$illo Lleno x5*, una rifa colombiana administrada por Camilo Andres Martinez Cordoba. Tu objetivo es vender números del sorteo activo de forma natural, cálida y persuasiva — como lo haría Camilo mismo por WhatsApp.
 
-🏆 *Sorteo activo:* ${sorteo.name}
-💰 Premio Mayor: *$${parseInt(sorteo.premioMayor).toLocaleString()}*
-⏰ Cierra: *${DateTime.fromISO(sorteo.date).toFormat('dd/MM HH:mm')}*
+═══ INFORMACIÓN DEL SORTEO ACTIVO ═══
+- Nombre: ${sorteo.name}
+- Premio mayor: $${premio} COP
+- Precio por número: $${precio} COP
+- Cierra: ${cierre}
+- Números del 00 al 99 (2 dígitos)
+- Con un número tienes 5 formas de ganar: premio mayor, seco 1, seco 2, seco 3, e invertidas
 
-*¿Cómo funciona?* Es sencillo:
-• Compras tu número del 00 al 99
-• Ganas con las *últimas 2 cifras* del premio mayor
-• Y tienes *4 chances más* (seco 1, 2, 3, invertidas)
+═══ DATOS DE PAGO ═══
+- Nequi: 3502429433
+- Bre-B: @NEQUICAM8170
+- Titular: Camilo Andres Martinez Cordoba
+- El cliente manda el comprobante por privado y Camilo confirma
 
-💚 *Precio:* $${parseInt(sorteo.precioNumero).toLocaleString()} por número
+═══ PERFIL DEL CLIENTE ═══
+- Tipo: ${perfil.tipo} (CLIENTE = ya ha comprado antes | INTERESADO = ha preguntado | FRIO = nuevo)
+- Nombre: ${perfil.data?.nombre || 'desconocido'}
 
-*Responde:*
-*1* → Ver números disponibles
-*2* → Comprar ahora
-*3* → Ver promociones
+═══ CONTEXTO ═══
+- Canal: ${isGroup ? 'Grupo de WhatsApp (372 miembros)' : 'Chat privado'}
+- En grupo: respuestas cortas y con gancho, invitar al privado para cerrar
+- En privado: puedes extenderte más, cerrar la venta directo
 
-¡Que Dios te bendiga en este juego! 🙏✨`;
+═══ REGLAS DE RESPUESTA ═══
+1. Habla en español colombiano natural y cálido, como Camilo
+2. Usa emojis con moderación (máximo 3-4 por mensaje)
+3. Mensajes cortos en grupo (máx 5 líneas), más completos en privado
+4. Si el cliente quiere comprar y dice cuántos números quiere, confirma la reserva con entusiasmo y da los datos de pago
+5. Si tiene dudas de confianza, menciona los años de trayectoria y pagos garantizados
+6. Si dice que está caro, ofrece el combo 3+1 o empezar con 1 solo número
+7. Si dice que no quiere, despídete amablemente y deja la puerta abierta
+8. NUNCA inventes números asignados — cuando el sistema confirme la asignación, esos números ya vienen en el contexto
+9. Si no hay sorteo activo, dilo honestamente y di que avisas cuando abra uno
+10. No uses asteriscos para negrita dentro de comillas de diálogo — solo para énfasis real`;
   }
 
-  cierreGrupo({ nombre, cantidad, numeros, sorteo, total }) {
-    const numsStr = numeros.map(n => `*${n}*`).join(', ');
-    
-    return `🎉 *¡RESERVA CONFIRMADA!* 🎉
+  // ─────────────────────────────────────────────
+  //  Llamada principal a Claude
+  // ─────────────────────────────────────────────
+  async generate({ jid, mensaje, sorteo, perfil, isGroup, accion, datosExtra = {} }) {
+    // Construir historial del chat
+    const historial = this.historiales.get(jid) || [];
 
-👤 ${nombre} acaba de asegurar ${cantidad} número${cantidad > 1 ? 's' : ''}:
-🔢 ${numsStr}
+    // Mensaje del usuario enriquecido con contexto de acción
+    let userContent = mensaje;
+    if (accion === 'CIERRE_PRIVADO' || accion === 'CIERRE_GRUPO') {
+      const { numeros, total, cantidad } = datosExtra;
+      userContent = `[SISTEMA: El cliente quiere comprar ${cantidad} número(s). El sistema YA asignó los números: ${numeros?.join(', ')}. Total a pagar: $${total?.toLocaleString('es-CO')}. Confirma la reserva con entusiasmo, muestra los números asignados y da los datos de pago.]`;
+    }
+    if (accion === 'NO_SORTEO') {
+      userContent = `[SISTEMA: No hay sorteo activo. El cliente preguntó: "${mensaje}". Informa amablemente.]`;
+    }
 
-💰 Total a pagar: *$${total.toLocaleString()}*
-
-⏰ Tienes *2 horas* para pagar o se liberan.
-
-💚 *Nequi:* 3502429433
-🔑 *Bre-B:* @NEQUICAM8170
-👤 *Titular:* Camilo Andres Martinez Cordoba
-
-Mándame el comprobante por *privado* y te confirmo 🙏
-
-¡Felicidades! Que te toque ese premio 🍀✨`;
-  }
-
-  cierrePrivado({ nombre, cantidad, numeros, sorteo, total }) {
-    const numsStr = numeros.map(n => `*${n}*`).join(', ');
-    
-    return `🎊 *¡LISTO ${nombre.toUpperCase()}!* 🎊
-
-Tus números están *RESERVADOS*:
-🔢 ${numsStr}
-
-💰 Valor: *$${total.toLocaleString()}*
-⏰ Paga en máximo *2 horas*
-
-*Métodos de pago:*
-💚 *Nequi:* 3502429433
-🔑 *Bre-B:* @NEQUICAM8170
-👤 *Titular:* Camilo Andres Martinez Cordoba
-
-*Importante:* Mándame el *pantallazo del pago* por aquí y te confirmo al toque ✅
-
-Recuerda: con estos números tienes *5 maneras de ganar* 🤑
-
-🙏 *Dios te bendiga y mucha suerte* 🍀`;
-  }
-
-  persuasion({ sorteo, perfil, entities }) {
-    const dudas = [
-      "💚 *100% confiable* — Llevamos más de 2 años pagando premios todos los días",
-      "🏆 *Premios garantizados* — Basados en la lotería oficial Sinuano",
-      "⚡ *Pago inmediato* — En menos de 1 hora después del sorteo",
-      "👥 *+500 clientes felices* — Únete a la familia Bol$illo Lleno"
+    const messages = [
+      ...historial,
+      { role: 'user', content: userContent }
     ];
 
-    return `🤔 *Entiendo que quieres pensarlo, ${perfil.data?.nombre?.split(' ')[0] || 'amigo'}*
+    try {
+      const res = await fetch(ANTHROPIC_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 400,
+          system: this.buildSystemPrompt(sorteo, perfil, isGroup),
+          messages
+        })
+      });
 
-Déjame contarte por qué *más de 500 personas* juegan con nosotros:
+      const data = await res.json();
 
-${dudas.slice(0, 3).join('\n\n')}
+      if (data.error) {
+        console.error('❌ Claude API error:', data.error);
+        return this.fallback(accion, sorteo, perfil, datosExtra);
+      }
 
-🎁 *PROMO ESPECIAL:* Si compras *3 números*, te regalo *1 más*
+      const respuesta = data.content?.[0]?.text || this.fallback(accion, sorteo, perfil, datosExtra);
 
-¿Te animas con uno solo para probar? Solo *$${parseInt(sorteo.precioNumero).toLocaleString()}* 🍀
+      // Guardar historial (máx 10 turnos = 20 mensajes)
+      historial.push(
+        { role: 'user',      content: mensaje },
+        { role: 'assistant', content: respuesta }
+      );
+      if (historial.length > 20) historial.splice(0, 2);
+      this.historiales.set(jid, historial);
 
-Responde *2* para comprar o *1* para ver disponibles`;
+      return respuesta;
+
+    } catch (err) {
+      console.error('❌ Error llamando Claude:', err);
+      return this.fallback(accion, sorteo, perfil, datosExtra);
+    }
   }
 
-  verNumeros(sorteo) {
-    return `🔢 *NÚMEROS DISPONIBLES — ${sorteo.name}*
+  // ─────────────────────────────────────────────
+  //  Fallback si Claude falla (plantillas básicas)
+  // ─────────────────────────────────────────────
+  fallback(accion, sorteo, perfil, datosExtra = {}) {
+    const precio = parseInt(sorteo?.precioNumero || 0).toLocaleString('es-CO');
+    const premio = parseInt(sorteo?.premioMayor  || 0).toLocaleString('es-CO');
+    const nombre = perfil?.data?.nombre?.split(' ')[0] || 'amigo';
 
-Te los muestro en el panel web (más fácil):
-🔗 https://bolsillolleno.github.io/SorteosBolsilloLleno/
-
-O dime: *"Quiero el [número]"* y te digo si está libre 👇
-
-Ejemplo: *"Quiero el 23"*
-
-💡 *Consejo:* Los números del 00 al 20 se agregan rápido 🔥`;
+    switch (accion) {
+      case 'CIERRE_PRIVADO':
+      case 'CIERRE_GRUPO': {
+        const { numeros = [], total = 0 } = datosExtra;
+        return `✅ *¡Reserva lista ${nombre}!*\n\n🔢 Tus números: *${numeros.join(', ')}*\n💰 Total: *$${total.toLocaleString('es-CO')}*\n\n💚 Nequi: 3502429433\n👤 Camilo Andres Martinez Cordoba\n\nMándame el comprobante y confirmo 🙏`;
+      }
+      case 'PERSUASION_PRIVADO':
+        return `🍀 *${nombre}*, con $${precio} tienes 5 formas de ganar *$${premio}*.\n\n¿Te animas con uno? 💪`;
+      case 'INFORMACION_GRUPO':
+        return `🍀 *Bol$illo Lleno x5* — Premio *$${premio}*\n💰 $${precio} por número · 5 formas de ganar\nEscríbeme al privado para reservar 👇`;
+      case 'NO_SORTEO':
+        return `⏰ Ahorita no tenemos sorteo abierto. Te aviso en cuanto abramos el próximo 🍀`;
+      default:
+        return `👋 Hola *${nombre}*! Somos *Bol$illo Lleno x5*.\nPremio: *$${premio}* · Precio: $${precio}/número\n¿Te interesa? 🍀`;
+    }
   }
 
-  menuCompra(sorteo) {
-    return `💰 *COMPRAR NÚMEROS*
-
-¿Cuántos quieres?
-
-*1 número* → $${parseInt(sorteo.precioNumero).toLocaleString()}
-*3 números* → $${(parseInt(sorteo.precioNumero) * 3).toLocaleString()} (te regalo 1 más 🎁)
-*5 números* → $${(parseInt(sorteo.precioNumero) * 5).toLocaleString()} (te regalo 2 más 🎁🎁)
-
-Dime: *"Quiero [cantidad] números"* o el número específico que deseas 👇`;
-  }
-
-  promociones(sorteo) {
-    return `🎁 *PROMOCIONES ACTIVAS*
-
-1️⃣ *Combo 3+1* — Compra 3, lleva 4
-2️⃣ *Combo 5+2* — Compra 5, lleva 7  
-3️⃣ *Cliente frecuente* — 10% descuento en tu 5ta compra
-
-🏆 *Además:* Si traes un amigo y compra, *tú ganas un número gratis*
-
-¿Cuál te interesa? Responde *1*, *2* o *3* 👇`;
-  }
-
-  infoGrupo({ sorteo, perfil }) {
-    return `🍀 *Bol$illo Lleno x5* — Sorteos Bendecidos
-
-🏆 *Próximo sorteo:* ${sorteo.name}
-💰 Premio: *$${parseInt(sorteo.premioMayor).toLocaleString()}*
-⏰ Cierra: *${DateTime.fromISO(sorteo.date).toFormat('dd/MM HH:mm')}*
-
-*¿Por qué jugar aquí?*
-✅ 5 maneras de ganar con 1 número
-✅ Pagos inmediatos por Nequi
-✅ Más de 2 años de confianza
-✅ +500 ganadores felices
-
-💚 *Nequi:* 3502429433
-👤 *Camilo Andres Martinez Cordoba*
-
-*Escríbeme al privado* para reservar tu número 🙏✨`;
-  }
-
-  reactivacionGrupo({ sorteo }) {
-    const urgencias = [
-      "🔥 *Solo quedan 15 números disponibles*",
-      "⏰ *Cierra en 2 horas* y aún hay premios por ganar",
-      "💰 *Última hora:* 3 personas están por pagar sus números"
-    ];
-    
-    return `👋 *¿Alguien más quiere suerte hoy?*
-
-${urgencias[Math.floor(Math.random() * urgencias.length)]}
-
-🏆 *${sorteo.name}*
-💰 *$${parseInt(sorteo.premioMayor).toLocaleString()}* en premios
-
-*¿Todavía estás a tiempo?* Escribe *"Quiero"* y te reservo el mejor disponible 🍀
-
-💚 Nequi: 3502429433`;
-  }
-
-  despedidaAmable() {
-    return `🙏 *Perfecto, no hay problema*
-
-Si en algún momento quieres probar suerte, aquí estaré.
-
-*Dios te bendiga* y que tengas un excelente día 🍀✨
-
-— *Bol$illo Lleno x5*`;
+  // ─────────────────────────────────────────────
+  //  Limpiar historial de un JID (logout, etc.)
+  // ─────────────────────────────────────────────
+  clearHistorial(jid) {
+    this.historiales.delete(jid);
   }
 }
 
