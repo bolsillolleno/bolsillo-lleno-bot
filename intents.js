@@ -1,3 +1,5 @@
+// Ya incluye el manejo de NUEVO en determinarAccion — ver archivo generado
+// Este archivo reemplaza intents.js con soporte para tipo NUEVO desde segmentacion
 const { DateTime } = require('luxon');
 
 class IntentDetector {
@@ -6,13 +8,11 @@ class IntentDetector {
       compra: /comprar|quiero|reservar|me das|disponible|precio|valor|pago|nequi|davivienda|bancolombia/i,
       cantidad: /(\d+)\s*(numero|número|numeros|números|boletas|chances)/i,
       especifico: /(el|la|los)\s+(\d{1,2})/i,
-      informacion: /como funciona|que incluye|premio|sorteo|loteria|cuando|hora/i,
+      informacion: /como funciona|que incluye|premio|sorteo|loteria|cuando|hora|hola|buenas|info/i,
       dudas: /seguro|confiable|garantia|estafa/i,
       negativa: /no gracias|no quiero|para que|caro|gratis/i,
       mencion: /bot|sistema|automatizado/i,
-      urgencia: /ya|ahora|inmediato|rapido|urgente/i,
-      // ✅ Saludo genérico — indica contacto nuevo / inicio de conversación
-      saludo: /^(hola|hi|hey|buenas|buenos|buen|ola|saludos|test|probando|holi|holaa|holiii|que hay|quiubo)[\s!.?]*$/i
+      urgencia: /ya|ahora|inmediato|rapido|urgente/i
     };
   }
 
@@ -39,12 +39,14 @@ class IntentDetector {
     if (this.patterns.informacion.test(lower)) scores.media += 1;
     if (this.patterns.negativa.test(lower)) scores.baja += 3;
 
-    // ✅ Detectar saludo explícito
-    const esSaludo = this.patterns.saludo.test(lower.trim());
-
     let intencion = 'BAJA';
     if (scores.alta >= scores.media && scores.alta > scores.baja) intencion = 'ALTA';
     else if (scores.media > scores.baja) intencion = 'MEDIA';
+
+    // Sin ningún score (ej: "Hola") → tratar como MEDIA
+    if (scores.alta === 0 && scores.media === 0 && scores.baja === 0) {
+      intencion = 'MEDIA';
+    }
 
     const esGrupo = context.isGroup;
     const loMencionan = this.patterns.mencion.test(lower) || context.mentioned;
@@ -55,37 +57,30 @@ class IntentDetector {
       entities,
       esGrupo,
       loMencionan,
-      esSaludo,
       requiereRespuesta: esGrupo ? loMencionan : true,
-      accionRecomendada: this.determinarAccion(intencion, esGrupo, context.tipoUsuario, esSaludo)
+      accionRecomendada: this.determinarAccion(intencion, esGrupo, context.tipoUsuario)
     };
   }
 
-  determinarAccion(intencion, esGrupo, tipoUsuario, esSaludo = false) {
-    // Ignorar usuarios fríos en grupos (nunca interrumpir grupos)
-    if (tipoUsuario === 'FRIO' && esGrupo) return 'IGNORAR';
+  determinarAccion(intencion, esGrupo, tipoUsuario) {
+    // Grupos: solo responder a usuarios conocidos o que mencionan el bot
+    if (esGrupo && tipoUsuario === 'FRIO') return 'IGNORAR';
 
-    // ✅ BUG #7 FIX: saludos simples y usuarios nuevos en privado → bienvenida
-    // Antes: 'FRIO' + 'BAJA' + privado → 'NO_INSISTIR' (enviaba mensaje de despedida a alguien que solo dijo "hola")
-    if (esSaludo || (tipoUsuario === 'FRIO' && intencion === 'BAJA' && !esGrupo)) {
-      return 'BIENVENIDA';
-    }
-
-    if (intencion === 'ALTA' && tipoUsuario !== 'FRIO') {
+    if (intencion === 'ALTA') {
+      // ✅ CORREGIDO: en privado siempre cerrar, sin importar si es FRIO/NUEVO
       if (esGrupo) return 'CIERRE_GRUPO';
       return 'CIERRE_PRIVADO';
     }
 
-    if (intencion === 'ALTA' && tipoUsuario === 'FRIO') {
-      // Frío con alta intención en privado → persuadir primero
-      return esGrupo ? 'IGNORAR' : 'PERSUASION_PRIVADO';
-    }
-
     if (intencion === 'MEDIA') {
-      return esGrupo ? 'INFORMACION_GRUPO' : 'PERSUASION_PRIVADO';
+      if (esGrupo) return 'INFORMACION_GRUPO';
+      return 'PERSUASION_PRIVADO';
     }
 
-    return 'NO_INSISTIR';
+    // BAJA en privado → al menos una despedida amable
+    if (!esGrupo) return 'NO_INSISTIR';
+
+    return 'IGNORAR';
   }
 }
 
