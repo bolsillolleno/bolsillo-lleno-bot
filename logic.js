@@ -1,54 +1,51 @@
-const IntentDetector = require('./intents');
+const IntentDetector    = require('./intents');
 const SegmentacionService = require('./segmentacion.js');
-const SorteosService = require('./sorteos');
-const Responses = require('./responses');
-const antiBan = require('./antiBan');
+const SorteosService    = require('./sorteos');
+const Responses         = require('./responses');
+const antiBan           = require('./antiBan');
 const { humanDelay, typingSimulation } = require('./delay');
 
 class BotLogic {
   constructor(sock, state, firebase, io) {
-    this.sock = sock;
-    this.state = state;
+    this.sock     = sock;
+    this.state    = state;
     this.firebase = firebase;
-    this.io = io;
+    this.io       = io;
     this.intentDetector = new IntentDetector();
-    this.segmentacion = new SegmentacionService(firebase);
-    this.sorteos = new SorteosService(firebase);
-    this.responses = new Responses(firebase);
-    
-    // Cache de conversaciones activas
-    this.activeChats = new Map();
+    this.segmentacion   = new SegmentacionService(firebase);
+    this.sorteos        = new SorteosService(firebase);
+    this.responses      = new Responses(firebase);
+    this.activeChats    = new Map();
   }
 
   async handleMessage(msg) {
     if (!this.state.botActive) return;
 
-    const jid = msg.key.remoteJid;
-    const isGroup = jid.endsWith('@g.us');
+    const jid      = msg.key.remoteJid;
+    const isGroup  = jid.endsWith('@g.us');
     const pushName = msg.pushName || 'Usuario';
-    const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
-    
+    const text     = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
+
     if (!text) return;
 
-    // Actualizar UI en tiempo real
     this.updateChatUI(jid, pushName, text, 'incoming');
 
-    // 1. Verificar Anti-Ban
+    // 1. Anti-Ban
     const banCheck = antiBan.canSend(jid, isGroup);
     if (!banCheck.allowed) {
       console.log(`[ANTI-BAN] Bloqueado ${jid}: ${banCheck.reason}`);
       return;
     }
 
-    // 2. Segmentación del usuario
+    // 2. Segmentación
     const perfil = await this.segmentacion.clasificarUsuario(jid, pushName, text);
-    
-    // 3. Análisis de intención
-    const contexto = { 
-      isGroup, 
-      mentioned: this.isMentioned(msg, jid), 
+
+    // 3. Intención
+    const contexto = {
+      isGroup,
+      mentioned:   this.isMentioned(msg, jid),
       tipoUsuario: perfil.tipo,
-      historial: this.activeChats.get(jid)?.messages || []
+      historial:   this.activeChats.get(jid)?.messages || []
     };
     const analisis = this.intentDetector.analyze(text, contexto);
 
@@ -56,13 +53,13 @@ class BotLogic {
 
     // 4. Ejecutar acción
     const respuesta = await this.ejecutarAccion(analisis, jid, text, perfil, msg, isGroup);
-    
+
     if (respuesta) {
       await this.enviarRespuesta(jid, respuesta, isGroup);
       this.updateChatUI(jid, 'Bot', respuesta, 'outgoing');
     }
 
-    // 5. Registrar para anti-ban
+    // 5. Registrar anti-ban
     antiBan.registerSend(jid, isGroup);
   }
 
@@ -80,15 +77,14 @@ class BotLogic {
 
     if (!sorteo) return "⏰ *No hay sorteos activos en este momento.*\n\nTe aviso en cuanto abramos uno nuevo 🍀";
 
-    // GUARDAR/ACTUALIZAR CHAT ACTIVO
     if (!this.activeChats.has(jid)) {
       this.activeChats.set(jid, {
-        jid, 
-        nombre: perfil.data?.nombre || msg.pushName,
-        tipo: perfil.tipo,
-        intencionActual: intencion,
+        jid,
+        nombre:           perfil.data?.nombre || msg.pushName,
+        tipo:             perfil.tipo,
+        intencionActual:  intencion,
         numerosReservados: [],
-        startTime: Date.now()
+        startTime:        Date.now()
       });
     }
     const chat = this.activeChats.get(jid);
@@ -100,38 +96,32 @@ class BotLogic {
       case 'CIERRE_GRUPO': {
         if (entities.cantidad && entities.cantidad <= 3) {
           const asignacion = await this.sorteos.asignarNumeros(sorteo.id, entities.cantidad, {
-            nombre: chat.nombre,
+            nombre:   chat.nombre,
             telefono: jid.split('@')[0],
-            source: 'grupo_whatsapp'
+            source:   'grupo_whatsapp'
           });
           chat.numerosReservados = asignacion.numeros;
           return this.responses.cierreGrupo({
-            nombre: chat.nombre,
-            cantidad: entities.cantidad,
-            numeros: asignacion.numeros,
-            sorteo,
-            total: asignacion.total
+            nombre: chat.nombre, cantidad: entities.cantidad,
+            numeros: asignacion.numeros, sorteo, total: asignacion.total
           });
         }
         return this.responses.infoGrupo({ sorteo, perfil });
       }
 
       case 'CIERRE_PRIVADO': {
-        const cantidad = entities.cantidad || 1;
+        const cantidad   = entities.cantidad || 1;
         const asignacion = await this.sorteos.asignarNumeros(sorteo.id, cantidad, {
-          nombre: chat.nombre,
+          nombre:   chat.nombre,
           telefono: jid.split('@')[0],
-          source: 'privado_whatsapp'
+          source:   'privado_whatsapp'
         });
         chat.numerosReservados = asignacion.numeros;
         this.state.stats.sales++;
         this.io.emit('stats-update', this.state.stats);
         return this.responses.cierrePrivado({
-          nombre: chat.nombre,
-          cantidad,
-          numeros: asignacion.numeros,
-          sorteo,
-          total: asignacion.total
+          nombre: chat.nombre, cantidad,
+          numeros: asignacion.numeros, sorteo, total: asignacion.total
         });
       }
 
@@ -145,35 +135,27 @@ class BotLogic {
         return this.responses.despedidaAmable();
 
       default:
-        if (/^1$|^ver|^números|^numeros/i.test(text)) {
-          return this.responses.verNumeros(sorteo);
-        }
-        if (/^2$|^comprar|^quiero/i.test(text)) {
-          return this.responses.menuCompra(sorteo);
-        }
-        if (/^3$|^promo|^oferta/i.test(text)) {
-          return this.responses.promociones(sorteo);
-        }
+        if (/^1$|^ver|^números|^numeros/i.test(text))  return this.responses.verNumeros(sorteo);
+        if (/^2$|^comprar|^quiero/i.test(text))        return this.responses.menuCompra(sorteo);
+        if (/^3$|^promo|^oferta/i.test(text))          return this.responses.promociones(sorteo);
         return this.responses.bienvenida({ sorteo, perfil });
     }
   }
 
   async enviarRespuesta(jid, texto, isGroup) {
     try {
-      // Simular escritura humana
       await typingSimulation(this.sock, jid, 1500 + Math.random() * 2000);
-      
-      // Delay natural
       await humanDelay(500, 1500);
-      
-      // ✅ BUG #1 CORREGIDO: era { text } (undefined). Ahora { text: texto }
+
+      // ✅ BUG #4 CORREGIDO: era { text } (variable inexistente → undefined).
+      // El mensaje se "enviaba" con contenido vacío y WhatsApp lo descartaba silenciosamente.
       await this.sock.sendMessage(jid, { text: texto });
-      
+
       this.state.stats.sent++;
       this.io.emit('stats-update', this.state.stats);
 
       await this.firebase.logMessage('outgoing', jid.split('@')[0], texto, true);
-      
+
     } catch (err) {
       console.error('Error enviando:', err);
       this.state.stats.errors++;
@@ -186,27 +168,27 @@ class BotLogic {
     const chat = this.activeChats.get(jid) || { jid, nombre, messages: [] };
     chat.messages = chat.messages.slice(-49);
     chat.messages.push({
-      id: Date.now(),
+      id:        Date.now(),
       nombre,
-      mensaje: mensaje.substring(0, 200),
+      mensaje:   mensaje.substring(0, 200),
       tipo,
       timestamp: new Date().toISOString()
     });
     this.activeChats.set(jid, chat);
     this.state.chats.set(jid, {
       jid,
-      nombre: chat.nombre,
-      tipo: chat.tipo,
+      nombre:      chat.nombre,
+      tipo:        chat.tipo,
       lastMessage: mensaje.substring(0, 50),
-      unread: tipo === 'incoming' ? (this.state.chats.get(jid)?.unread || 0) + 1 : 0,
-      timestamp: Date.now()
+      unread:      tipo === 'incoming' ? (this.state.chats.get(jid)?.unread || 0) + 1 : 0,
+      timestamp:   Date.now()
     });
     this.io.emit('chats-update', Array.from(this.state.chats.values()));
   }
 
   async reactivarGrupos() {
     const grupos = Array.from(this.activeChats.entries())
-      .filter(([jid, chat]) => jid.endsWith('@g.us') && 
+      .filter(([jid, chat]) => jid.endsWith('@g.us') &&
         Date.now() - chat.startTime > 4 * 60 * 60 * 1000);
 
     for (const [jid] of grupos) {

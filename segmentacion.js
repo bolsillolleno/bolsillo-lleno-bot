@@ -2,22 +2,22 @@ class SegmentacionService {
   constructor(firebase) {
     this.firebase = firebase;
     this.clientesCache = new Map();
-    // ✅ BUG #5 CORREGIDO: Cache en memoria para interacciones de la sesión actual
+    // ✅ BUG #6 CORREGIDO: cache en memoria para contar interacciones reales
     this.interaccionesCache = new Map();
   }
 
   async clasificarUsuario(jid, pushName, messageText) {
-    const phone = jid.split('@')[0];
-    
+    const phone    = jid.split('@')[0];
+    const esPrivado = !jid.endsWith('@g.us');
+
     // 1. Buscar en clientesDB de Firebase
     try {
-      const clientes = await this.firebase.getClientesDB();
+      const clientes  = await this.firebase.getClientesDB();
       const clienteDB = clientes.find(c => c.telefono && c.telefono.includes(phone.slice(-8)));
-      
       if (clienteDB) {
         return {
-          tipo: 'CLIENTE',
-          data: clienteDB,
+          tipo:     'CLIENTE',
+          data:     clienteDB,
           confianza: 1.0,
           etiquetas: this.extraerEtiquetas(pushName, clienteDB.nombre || '')
         };
@@ -31,25 +31,23 @@ class SegmentacionService {
       return { tipo: 'CLIENTE', data: { nombre: pushName }, etiquetas: ['VIP_DETECTADO'] };
     }
 
-    // 3. ✅ BUG #5 CORREGIDO: Usar cache en memoria para contar interacciones
-    // Antes: getHistorialInteracciones() siempre retornaba 0 → todos FRIO
-    const historial = this.getHistorialLocal(phone);
-    
-    // Registrar esta interacción
-    this.registrarInteraccionLocal(phone);
+    // 3. ✅ BUG #6 CORREGIDO: usar cache en memoria en vez de placeholder que retornaba 0
+    // Antes: getHistorialInteracciones() siempre retornaba 0 → todos clasificaban como FRIO
+    // → combinado con Bug #5, NADIE en privado recibía respuesta.
+    const historial = this.interaccionesCache.get(phone) || 0;
+    this.interaccionesCache.set(phone, historial + 1);
 
     if (historial > 0) {
-      return { 
-        tipo: 'INTERESADO', 
-        data: { nombre: pushName },
-        nivel: historial > 3 ? 'caliente' : 'tibio',
+      return {
+        tipo:         'INTERESADO',
+        data:         { nombre: pushName },
+        nivel:        historial > 3 ? 'caliente' : 'tibio',
         interacciones: historial
       };
     }
 
-    // 4. Primera vez que escribe → NUEVO (no FRIO para privados)
-    // En privado, si alguien escribe por primera vez, claramente está interesado
-    const esPrivado = !jid.endsWith('@g.us');
+    // 4. Primera vez que escribe en privado → NUEVO (no FRIO)
+    // Si alguien escribe por primera vez al privado, está interesado por definición
     if (esPrivado) {
       return { tipo: 'NUEVO', data: { nombre: pushName } };
     }
@@ -57,19 +55,10 @@ class SegmentacionService {
     return { tipo: 'FRIO' };
   }
 
-  getHistorialLocal(phone) {
-    return this.interaccionesCache.get(phone) || 0;
-  }
-
-  registrarInteraccionLocal(phone) {
-    const actual = this.interaccionesCache.get(phone) || 0;
-    this.interaccionesCache.set(phone, actual + 1);
-  }
-
   extraerEtiquetas(pushName, dbName) {
     const tags = [];
     if (/camilo|andres|martinez/i.test(pushName)) tags.push('STAFF');
-    if (/distribuidor|vendedor/i.test(pushName)) tags.push('DISTRIBUIDOR');
+    if (/distribuidor|vendedor/i.test(pushName))  tags.push('DISTRIBUIDOR');
     return tags;
   }
 }
