@@ -17,17 +17,16 @@ const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] }
 });
 
-// ✅ Estado global CORREGIDO — todos los campos que usan los módulos
 const state = {
   connection: 'disconnected',
   qrCode:     null,
-  botActive:  true,         // ✅ Bug #1 corregido — antes no existía
-  chats:      new Map(),    // ✅ Bug #3 corregido — antes no existía
+  botActive:  true,
+  chats:      new Map(),
   stats: {
     received: 0,
     sent:     0,
     errors:   0,
-    sales:    0             // ✅ usado en logic.js
+    sales:    0
   }
 };
 
@@ -62,6 +61,30 @@ app.get('/status', (req, res) => {
   res.json({ status: state.connection, botActive: state.botActive, stats: state.stats });
 });
 
+// ✅ NUEVO: Endpoint para obtener grupos donde el bot es admin
+// Soluciona "Sin grupos admin detectados" en la pantalla Outreach
+app.get('/groups', async (req, res) => {
+  if (state.connection !== 'connected') {
+    return res.status(503).json({ ok: false, error: 'WhatsApp no conectado', groups: [] });
+  }
+  try {
+    const groups = await fetchAdminGroups();
+    res.json({ ok: true, groups });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, groups: [] });
+  }
+});
+
+// ✅ NUEVO: Endpoint para obtener clientes de Firebase (soluciona "Clientes DB: 0")
+app.get('/clients', async (req, res) => {
+  try {
+    const clientes = await firebase.getClientesDB();
+    res.json({ ok: true, clients: clientes, total: clientes.length });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, clients: [] });
+  }
+});
+
 app.get('/qr', async (req, res) => {
   try {
     if (!state.qrCode) {
@@ -88,7 +111,6 @@ app.get('/qr', async (req, res) => {
   }
 });
 
-// Enviar mensaje desde el panel (HTTP)
 app.post('/send', async (req, res) => {
   const { to, message } = req.body;
   if (!to || !message)
@@ -106,13 +128,39 @@ app.post('/send', async (req, res) => {
   }
 });
 
-// Toggle bot ON/OFF desde HTTP
 app.post('/bot/toggle', (req, res) => {
   state.botActive = !state.botActive;
   io.emit('bot-status', state.botActive);
   console.log(`🤖 Bot ${state.botActive ? 'ACTIVADO ✅' : 'DESACTIVADO 🔴'}`);
   res.json({ ok: true, botActive: state.botActive });
 });
+
+// ════════════════════════════════════
+//  HELPERS INTERNOS
+// ════════════════════════════════════
+
+// ✅ NUEVO: función interna que obtiene grupos donde el bot es admin
+async function fetchAdminGroups() {
+  if (!waConnection.sock) return [];
+  
+  // groupFetchAllParticipating devuelve { [id]: { id, subject, desc, owner, participants, ... } }
+  const allGroups = await waConnection.sock.groupFetchAllParticipating();
+  const botJid = waConnection.sock.user?.id;
+
+  const adminGroups = Object.values(allGroups).filter(group => {
+    // Verificar si el bot es admin en ese grupo
+    const me = group.participants?.find(p => p.id === botJid);
+    return me && (me.admin === 'admin' || me.admin === 'superadmin');
+  });
+
+  return adminGroups.map(g => ({
+    id: g.id,
+    name: g.subject || 'Grupo sin nombre',
+    participants: g.participants?.length || 0,
+    desc: g.desc || '',
+    creation: g.creation
+  }));
+}
 
 // ════════════════════════════════════
 //  SOCKET.IO
@@ -129,6 +177,34 @@ io.on('connection', (socket) => {
       if (!err) socket.emit('qr-code', url);
     });
   }
+
+  // ✅ NUEVO: El panel pide los grupos admin vía socket
+  socket.on('get-admin-groups', async () => {
+    if (state.connection !== 'connected') {
+      socket.emit('admin-groups', []);
+      return;
+    }
+    try {
+      const groups = await fetchAdminGroups();
+      console.log(`📋 Grupos admin enviados al panel: ${groups.length}`);
+      socket.emit('admin-groups', groups);
+    } catch (err) {
+      console.error('Error fetching groups:', err);
+      socket.emit('admin-groups', []);
+    }
+  });
+
+  // ✅ NUEVO: El panel pide clientes Firebase vía socket
+  socket.on('get-clients', async () => {
+    try {
+      const clientes = await firebase.getClientesDB();
+      socket.emit('clients-update', clientes);
+      console.log(`👥 Clientes Firebase enviados al panel: ${clientes.length}`);
+    } catch (err) {
+      console.error('Error fetching clients:', err);
+      socket.emit('clients-update', []);
+    }
+  });
 
   socket.on('send-message', async ({ to, message }) => {
     if (state.connection !== 'connected') {
