@@ -1,5 +1,7 @@
-const antiBan = require('../utils/antiBan');
-const { humanDelay } = require('../utils/delay');
+// ✅ BUG #5 FIX: rutas corregidas — antiBan y delay están en la raíz, no en ../utils/
+// Antes: require('../utils/antiBan') y require('../utils/delay') → MODULE_NOT_FOUND en runtime
+const antiBan = require('./antiBan');
+const { humanDelay } = require('./delay');
 
 class MessageQueue {
   constructor(sock, firebase) {
@@ -27,11 +29,10 @@ class MessageQueue {
       const item = this.queue.shift();
       const isGroup = item.jid.endsWith('@g.us');
       
-      // Verificar anti-ban
       const check = antiBan.canSend(item.jid, isGroup);
       if (!check.allowed) {
         console.log(`[QUEUE] Postergado ${item.jid}: ${check.reason}`);
-        this.queue.push({ ...item, retryAfter: Date.now() + 300000 }); // Reintentar en 5min
+        this.queue.push({ ...item, retryAfter: Date.now() + 300000 });
         await humanDelay(5000, 10000);
         continue;
       }
@@ -40,7 +41,6 @@ class MessageQueue {
         await this.sock.sendMessage(item.jid, { text: item.message });
         await this.firebase.logMessage('queued', item.jid.split('@')[0], item.message, true);
         
-        // Delay entre mensajes (2-5 min)
         await new Promise(r => setTimeout(r, antiBan.getInterval()));
         
       } catch (err) {
