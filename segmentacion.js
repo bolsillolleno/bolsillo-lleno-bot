@@ -2,12 +2,12 @@ class SegmentacionService {
   constructor(firebase) {
     this.firebase = firebase;
     this.clientesCache = new Map();
-    // ✅ BUG #6 CORREGIDO: cache en memoria para contar interacciones reales
+    // ✅ FIX #7: cache en memoria para contar interacciones reales de la sesión
     this.interaccionesCache = new Map();
   }
 
   async clasificarUsuario(jid, pushName, messageText) {
-    const phone    = jid.split('@')[0];
+    const phone     = jid.split('@')[0];
     const esPrivado = !jid.endsWith('@g.us');
 
     // 1. Buscar en clientesDB de Firebase
@@ -16,8 +16,8 @@ class SegmentacionService {
       const clienteDB = clientes.find(c => c.telefono && c.telefono.includes(phone.slice(-8)));
       if (clienteDB) {
         return {
-          tipo:     'CLIENTE',
-          data:     clienteDB,
+          tipo:      'CLIENTE',
+          data:      clienteDB,
           confianza: 1.0,
           etiquetas: this.extraerEtiquetas(pushName, clienteDB.nombre || '')
         };
@@ -31,23 +31,24 @@ class SegmentacionService {
       return { tipo: 'CLIENTE', data: { nombre: pushName }, etiquetas: ['VIP_DETECTADO'] };
     }
 
-    // 3. ✅ BUG #6 CORREGIDO: usar cache en memoria en vez de placeholder que retornaba 0
-    // Antes: getHistorialInteracciones() siempre retornaba 0 → todos clasificaban como FRIO
-    // → combinado con Bug #5, NADIE en privado recibía respuesta.
+    // 3. ✅ FIX #7: usar cache en memoria en vez del placeholder que retornaba 0
+    // Antes: getHistorialInteracciones() siempre devolvía 0 → todos clasificaban FRIO
+    // → combinado con bug en intents.js, NADIE recibía respuesta en privado.
     const historial = this.interaccionesCache.get(phone) || 0;
     this.interaccionesCache.set(phone, historial + 1);
 
     if (historial > 0) {
       return {
-        tipo:         'INTERESADO',
-        data:         { nombre: pushName },
-        nivel:        historial > 3 ? 'caliente' : 'tibio',
+        tipo:          'INTERESADO',
+        data:          { nombre: pushName },
+        nivel:         historial > 3 ? 'caliente' : 'tibio',
         interacciones: historial
       };
     }
 
-    // 4. Primera vez que escribe en privado → NUEVO (no FRIO)
-    // Si alguien escribe por primera vez al privado, está interesado por definición
+    // 4. ✅ FIX #8: primera vez en privado → NUEVO, no FRIO
+    // Si alguien escribe al privado por primera vez, está interesado por definición.
+    // FRIO solo aplica en grupos para desconocidos.
     if (esPrivado) {
       return { tipo: 'NUEVO', data: { nombre: pushName } };
     }
