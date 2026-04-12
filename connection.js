@@ -23,14 +23,10 @@ class WhatsAppConnection {
     this.retryCount = 0;
   }
 
+  // ✅ FIX: connect() ya NO borra la sesión.
+  //    Solo conecta (o reconecta) usando las credenciales existentes si las hay.
   async connect() {
     try {
-      // 🧹 LIMPIAR SESIÓN PARA FORZAR QR
-      if (fs.existsSync(SESSION_DIR)) {
-        fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-        console.log('🧹 Sesión eliminada para generar QR limpio');
-      }
-
       const { state: authState, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
       const { version } = await fetchLatestBaileysVersion();
 
@@ -38,17 +34,17 @@ class WhatsAppConnection {
       this.io.emit('connection-status', 'connecting');
 
       this.sock = makeWASocket({
-  version,
-  logger: P({ level: 'silent' }),
-  printQRInTerminal: true, // 👈 IMPORTANTE
-  auth: authState,
-  browser: ['Bol$illoBot', 'Chrome', '1.0'],
-  connectTimeoutMs: 60000, // 👈 clave
-  defaultQueryTimeoutMs: 0,
-  keepAliveIntervalMs: 10000,
-  emitOwnEvents: true,
-  fireInitQueries: true
-});
+        version,
+        logger: P({ level: 'silent' }),
+        printQRInTerminal: true,
+        auth: authState,
+        browser: ['Bol$illoBot', 'Chrome', '1.0'],
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0,
+        keepAliveIntervalMs: 10000,
+        emitOwnEvents: true,
+        fireInitQueries: true
+      });
 
       this.setupListeners(saveCreds);
 
@@ -58,22 +54,52 @@ class WhatsAppConnection {
     }
   }
 
+  // ✅ NUEVO: reconexión forzada desde el panel (borra sesión y pide QR nuevo)
+  async reconnectFresh() {
+    console.log('🔄 Reconexión forzada — limpiando sesión...');
+
+    if (this.sock) {
+      try { this.sock.end(); } catch (_) {}
+      this.sock = null;
+    }
+
+    if (fs.existsSync(SESSION_DIR)) {
+      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+      console.log('🧹 Sesión eliminada');
+    }
+
+    this.retryCount = 0;
+    await this.connect();
+  }
+
+  // ✅ NUEVO: desconexión limpia desde el panel
+  async disconnect() {
+    console.log('🔌 Desconectando WhatsApp...');
+
+    if (this.sock) {
+      try { await this.sock.logout(); } catch (_) {}
+      this.sock = null;
+    }
+
+    this.state.connection = 'disconnected';
+    this.state.qrCode = null;
+    this.io.emit('connection-status', 'disconnected');
+  }
+
   setupListeners(saveCreds) {
     this.sock.ev.on('creds.update', async () => {
-      await saveCreds();
+      await saveCreds();  // ✅ Guarda credenciales — NUNCA se borra por encima de esto
     });
 
     this.sock.ev.on('connection.update', (update) => {
-console.log('🧠 UPDATE:', update);
+      console.log('🧠 UPDATE:', update);
 
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
         console.log('📲 QR generado');
-
         this.state.qrCode = qr;
         this.state.connection = 'qr';
-
         this.io.emit('connection-status', 'qr');
 
         QRCode.toDataURL(qr, (err, url) => {
@@ -86,20 +112,27 @@ console.log('🧠 UPDATE:', update);
         const loggedOut = code === DisconnectReason.loggedOut;
 
         if (loggedOut) {
-          console.log('🔴 Sesión cerrada');
+          // ✅ Solo borra sesión si WhatsApp cerró sesión explícitamente
+          console.log('🔴 Sesión cerrada por WhatsApp — limpiando...');
+
+          if (fs.existsSync(SESSION_DIR)) {
+            fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+          }
+
           this.state.connection = 'disconnected';
+          this.state.qrCode = null;
           this.io.emit('connection-status', 'disconnected');
+
         } else {
+          // Reconexión normal SIN borrar sesión
           this.handleReconnect();
         }
 
       } else if (connection === 'open') {
         console.log('✅ WhatsApp Conectado');
-
         this.state.connection = 'connected';
         this.state.qrCode = null;
         this.retryCount = 0;
-
         this.io.emit('connection-status', 'connected');
       }
     });
@@ -107,11 +140,8 @@ console.log('🧠 UPDATE:', update);
 
   handleReconnect() {
     this.retryCount++;
-
     const delay = Math.min(1000 * 2 ** this.retryCount, 30000);
-
-    console.log(`🔄 Reconectando en ${delay / 1000}s...`);
-
+    console.log(`🔄 Reconectando en ${delay / 1000}s... (intento #${this.retryCount})`);
     setTimeout(() => this.connect(), delay);
   }
 }
