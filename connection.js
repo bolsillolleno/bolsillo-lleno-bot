@@ -12,6 +12,8 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 
+const MessageListener = require('./listener'); // ✅ BUG #2 FIX: importar aquí
+
 const SESSION_DIR = path.join(process.cwd(), 'auth_info');
 
 class WhatsAppConnection {
@@ -21,12 +23,15 @@ class WhatsAppConnection {
     this.firebase = firebase;
     this.sock = null;
     this.retryCount = 0;
+    this.listener = null;
   }
 
-  // ✅ FIX: connect() ya NO borra la sesión.
-  //    Solo conecta (o reconecta) usando las credenciales existentes si las hay.
   async connect() {
     try {
+      // ✅ BUG #1 FIX: NO borrar la sesión aquí.
+      // Antes: borraba la carpeta en CADA connect() → al reconectar perdía las credenciales → QR infinito
+      // Ahora: solo se borra si el usuario hace logout explícito (método disconnect())
+
       const { state: authState, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
       const { version } = await fetchLatestBaileysVersion();
 
@@ -38,7 +43,7 @@ class WhatsAppConnection {
         logger: P({ level: 'silent' }),
         printQRInTerminal: true,
         auth: authState,
-        browser: ['Bol$illoBot', 'Chrome', '1.0'],
+        browser: ['BolsilloBot', 'Chrome', '1.0'],
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 0,
         keepAliveIntervalMs: 10000,
@@ -54,41 +59,9 @@ class WhatsAppConnection {
     }
   }
 
-  // ✅ NUEVO: reconexión forzada desde el panel (borra sesión y pide QR nuevo)
-  async reconnectFresh() {
-    console.log('🔄 Reconexión forzada — limpiando sesión...');
-
-    if (this.sock) {
-      try { this.sock.end(); } catch (_) {}
-      this.sock = null;
-    }
-
-    if (fs.existsSync(SESSION_DIR)) {
-      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-      console.log('🧹 Sesión eliminada');
-    }
-
-    this.retryCount = 0;
-    await this.connect();
-  }
-
-  // ✅ NUEVO: desconexión limpia desde el panel
-  async disconnect() {
-    console.log('🔌 Desconectando WhatsApp...');
-
-    if (this.sock) {
-      try { await this.sock.logout(); } catch (_) {}
-      this.sock = null;
-    }
-
-    this.state.connection = 'disconnected';
-    this.state.qrCode = null;
-    this.io.emit('connection-status', 'disconnected');
-  }
-
   setupListeners(saveCreds) {
     this.sock.ev.on('creds.update', async () => {
-      await saveCreds();  // ✅ Guarda credenciales — NUNCA se borra por encima de esto
+      await saveCreds();
     });
 
     this.sock.ev.on('connection.update', (update) => {
@@ -112,36 +85,71 @@ class WhatsAppConnection {
         const loggedOut = code === DisconnectReason.loggedOut;
 
         if (loggedOut) {
-          // ✅ Solo borra sesión si WhatsApp cerró sesión explícitamente
-          console.log('🔴 Sesión cerrada por WhatsApp — limpiando...');
-
+          console.log('🔴 Sesión cerrada (logout)');
+          // Solo al hacer logout borramos la sesión guardada
           if (fs.existsSync(SESSION_DIR)) {
             fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+            console.log('🧹 Credenciales eliminadas por logout');
           }
-
           this.state.connection = 'disconnected';
-          this.state.qrCode = null;
           this.io.emit('connection-status', 'disconnected');
-
         } else {
-          // Reconexión normal SIN borrar sesión
+          // Reconexión normal: NO borrar sesión, solo reconectar
           this.handleReconnect();
         }
 
       } else if (connection === 'open') {
         console.log('✅ WhatsApp Conectado');
+
         this.state.connection = 'connected';
         this.state.qrCode = null;
         this.retryCount = 0;
+
         this.io.emit('connection-status', 'connected');
+
+        // ✅ BUG #2 FIX: Inicializar el listener de mensajes al conectar
+        // Antes: nunca se instanciaba → el bot nunca respondía mensajes
+        if (!this.listener) {
+          this.listener = new MessageListener(this.sock, this.state, this.firebase, this.io);
+          console.log('👂 MessageListener activado');
+        }
       }
     });
+  }
+
+  // ✅ BUG #3 FIX: Método sendMessage que faltaba — server.js lo llama pero no existía
+  async sendMessage(jid, message) {
+    if (!this.sock) throw new Error('Socket no inicializado');
+    await this.sock.sendMessage(jid, { text: message });
+  }
+
+  // ✅ BUG #3 FIX: reconnectFresh — server.js lo llama desde socket 'reconnect-wa' pero no existía
+  async reconnectFresh() {
+    console.log('🔄 Reconexión forzada desde panel');
+    // Borrar sesión solo en reconexión manual explícita
+    if (fs.existsSync(SESSION_DIR)) {
+      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+    }
+    this.listener = null;
+    await this.connect();
+  }
+
+  // ✅ BUG #3 FIX: disconnect — server.js lo llama desde socket 'disconnect-wa' pero no existía
+  async disconnect() {
+    console.log('🔌 Desconexión manual');
+    try {
+      await this.sock?.logout();
+    } catch (_) {}
+    this.listener = null;
+    this.state.connection = 'disconnected';
+    this.io.emit('connection-status', 'disconnected');
   }
 
   handleReconnect() {
     this.retryCount++;
     const delay = Math.min(1000 * 2 ** this.retryCount, 30000);
-    console.log(`🔄 Reconectando en ${delay / 1000}s... (intento #${this.retryCount})`);
+    console.log(`🔄 Reconectando en ${delay / 1000}s... (intento ${this.retryCount})`);
+    this.listener = null; // Limpiar listener para recrearlo al conectar
     setTimeout(() => this.connect(), delay);
   }
 }
