@@ -1,256 +1,228 @@
-const IntentDetector    = require('./intents');
-const SegmentacionService = require('./segmentacion');
-const SorteosService    = require('./sorteos');
-const Responses         = require('./responses');
-const antiBan           = require('./antiBan');
+const IntentDetector = require('./intents');
+const SegmentacionService = require('./segmentacion.js');
+const SorteosService = require('./sorteos');
+const Responses = require('./responses');
+const antiBan = require('./antiBan');
 const { humanDelay, typingSimulation } = require('./delay');
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  BotLogic — Bol$illo Lleno x5
-//  Claude responde · Solo activo en grupos donde
-//  Camilo es administrador
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class BotLogic {
   constructor(sock, state, firebase, io) {
-    this.sock         = sock;
-    this.state        = state;
-    this.firebase     = firebase;
-    this.io           = io;
+    this.sock = sock;
+    this.state = state;
+    this.firebase = firebase;
+    this.io = io;
     this.intentDetector = new IntentDetector();
     this.segmentacion = new SegmentacionService(firebase);
-    this.sorteos      = new SorteosService(firebase);
-    this.responses    = new Responses(firebase);
-    this.activeChats  = new Map();
-
-    // Cache de grupos donde somos admin
-    // Se rellena la primera vez que llega un mensaje de un grupo
-    this.adminGroups  = new Set();
-    this.checkedGroups = new Set();
+    this.sorteos = new SorteosService(firebase);
+    this.responses = new Responses(firebase);
+    
+    // Cache de conversaciones activas
+    this.activeChats = new Map();
   }
 
-  // ─────────────────────────────────────────────
-  //  ¿Somos admin en este grupo?
-  // ─────────────────────────────────────────────
-  async isAdminInGroup(groupJid) {
-    if (this.adminGroups.has(groupJid))  return true;
-    if (this.checkedGroups.has(groupJid)) return false;
-
-    try {
-      const metadata  = await this.sock.groupMetadata(groupJid);
-      const myId      = this.sock.user.id.split(':')[0];
-      const me        = metadata.participants.find(p => p.id.split(':')[0] === myId);
-      const esAdmin   = me?.admin === 'admin' || me?.admin === 'superadmin';
-
-      this.checkedGroups.add(groupJid);
-      if (esAdmin) {
-        this.adminGroups.add(groupJid);
-        console.log(`✅ Admin confirmado en grupo: ${metadata.subject}`);
-      } else {
-        console.log(`🚫 No somos admin en: ${metadata.subject} — bot silencioso`);
-      }
-      return esAdmin;
-    } catch (err) {
-      console.error('Error verificando admin grupo:', err);
-      return false;
-    }
-  }
-
-  // ─────────────────────────────────────────────
-  //  Entry point — procesar mensaje entrante
-  // ─────────────────────────────────────────────
   async handleMessage(msg) {
     if (!this.state.botActive) return;
 
-    const jid     = msg.key.remoteJid;
+    const jid = msg.key.remoteJid;
     const isGroup = jid.endsWith('@g.us');
     const pushName = msg.pushName || 'Usuario';
-    const text     = (
-      msg.message?.conversation ||
-      msg.message?.extendedTextMessage?.text || ''
-    ).trim();
-
+    const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
+    
     if (!text) return;
-
-    // ── Grupos: solo donde somos admin ──────────
-    if (isGroup) {
-      const esAdmin = await this.isAdminInGroup(jid);
-      if (!esAdmin) return;
-    }
-
-    // Registrar contacto entrante en antiBan
-    antiBan.registerIncoming(jid);
 
     // Actualizar UI en tiempo real
     this.updateChatUI(jid, pushName, text, 'incoming');
-    this.state.stats.received++;
-    this.io.emit('stats-update', this.state.stats);
 
-    // ── Anti-Ban ────────────────────────────────
+    // 1. Verificar Anti-Ban
     const banCheck = antiBan.canSend(jid, isGroup);
     if (!banCheck.allowed) {
       console.log(`[ANTI-BAN] Bloqueado ${jid}: ${banCheck.reason}`);
       return;
     }
 
-    // ── Segmentación ────────────────────────────
+    // 2. Segmentación del usuario
     const perfil = await this.segmentacion.clasificarUsuario(jid, pushName, text);
-
-    // ── Intención ───────────────────────────────
-    const contexto = {
-      isGroup,
-      mentioned:   this.isMentioned(msg),
+    
+    // 3. Análisis de intención
+    const contexto = { 
+      isGroup, 
+      mentioned: this.isMentioned(msg, jid), 
       tipoUsuario: perfil.tipo,
-      historial:   this.activeChats.get(jid)?.messages || []
+      historial: this.activeChats.get(jid)?.messages || []
     };
     const analisis = this.intentDetector.analyze(text, contexto);
 
-    console.log(`[BOT] ${pushName} | ${perfil.tipo} | ${analisis.intencion} | ${analisis.accionRecomendada}`);
+    console.log(`[BOT] ${pushName} | ${jid} | Tipo: ${perfil.tipo} | Intención: ${analisis.intencion} | Acción: ${analisis.accionRecomendada}`);
 
-    // ── Ejecutar ─────────────────────────────────
+    // 4. Ejecutar acción
     const respuesta = await this.ejecutarAccion(analisis, jid, text, perfil, msg, isGroup);
-
+    
     if (respuesta) {
-      await this.enviarRespuesta(jid, respuesta, isGroup, text.length);
-      this.updateChatUI(jid, 'Bot 🤖', respuesta, 'outgoing');
-      antiBan.registerSend(jid, isGroup);
+      await this.enviarRespuesta(jid, respuesta, isGroup);
+      this.updateChatUI(jid, 'Bot', respuesta, 'outgoing');
     }
+
+    // 5. Registrar para anti-ban
+    antiBan.registerSend(jid, isGroup);
   }
 
-  isMentioned(msg) {
+  isMentioned(msg, jid) {
     const extended = msg.message?.extendedTextMessage;
     if (extended?.contextInfo?.participant === this.sock.user?.id) return true;
+    
     const text = (msg.message?.conversation || extended?.text || '').toLowerCase();
     return /bot|sistema|automatizado|bolsillo/i.test(text);
   }
 
-  // ─────────────────────────────────────────────
-  //  Lógica de acciones — Claude genera el texto
-  // ─────────────────────────────────────────────
   async ejecutarAccion(analisis, jid, text, perfil, msg, isGroup) {
     const { intencion, accionRecomendada, entities } = analisis;
+    const sorteosActivos = await this.firebase.getSorteosActivos();
+    const sorteo = sorteosActivos[0];
 
-    // Actualizar chat activo
+    if (!sorteo) return "⏰ *No hay sorteos activos en este momento.*\n\nTe aviso en cuanto abramos uno nuevo 🍀";
+
     if (!this.activeChats.has(jid)) {
       this.activeChats.set(jid, {
-        jid,
-        nombre:           perfil.data?.nombre || msg.pushName,
-        tipo:             perfil.tipo,
+        jid, 
+        nombre: perfil.data?.nombre || msg.pushName,
+        tipo: perfil.tipo,
+        intencionActual: intencion,
         numerosReservados: [],
-        messages:         [],
-        startTime:        Date.now()
+        startTime: Date.now()
       });
     }
     const chat = this.activeChats.get(jid);
 
-    // Sorteo activo
-    const sorteosActivos = await this.firebase.getSorteosActivos();
-    const sorteo = sorteosActivos?.[0];
-
-    if (!sorteo) {
-      return this.responses.generate({
-        jid, mensaje: text, sorteo: { name: '', premioMayor: 0, precioNumero: 0, date: '' },
-        perfil, isGroup, accion: 'NO_SORTEO'
-      });
-    }
-
     switch (accionRecomendada) {
-
       case 'IGNORAR':
         return null;
 
-      // ── Cierre en grupo ──────────────────────
-      case 'CIERRE_GRUPO': {
-        const cantidad = Math.min(entities.cantidad || 1, 5);
-        const asignacion = await this.sorteos.asignarNumeros(sorteo.id, cantidad, {
-          nombre:   chat.nombre,
-          telefono: jid.split('@')[0],
-          source:   'grupo_whatsapp'
-        });
-        chat.numerosReservados = asignacion.numeros;
-        return this.responses.generate({
-          jid, mensaje: text, sorteo, perfil, isGroup,
-          accion: 'CIERRE_GRUPO',
-          datosExtra: { numeros: asignacion.numeros, total: asignacion.total, cantidad }
-        });
-      }
+      case 'CIERRE_GRUPO':
+        if (entities.cantidad && entities.cantidad <= 3) {
+          const asignacion = await this.sorteos.asignarNumeros(sorteo.id, entities.cantidad, {
+            nombre: chat.nombre,
+            telefono: jid.split('@')[0],
+            source: 'grupo_whatsapp'
+          });
+          
+          chat.numerosReservados = asignacion.numeros;
+          
+          return this.responses.cierreGrupo({
+            nombre: chat.nombre,
+            cantidad: entities.cantidad,
+            numeros: asignacion.numeros,
+            sorteo,
+            total: asignacion.total
+          });
+        }
+        return this.responses.infoGrupo({ sorteo, perfil });
 
-      // ── Cierre en privado ────────────────────
       case 'CIERRE_PRIVADO': {
-        const cantidad = Math.min(entities.cantidad || 1, 10);
+        const cantidad = entities.cantidad || 1;
         const asignacion = await this.sorteos.asignarNumeros(sorteo.id, cantidad, {
-          nombre:   chat.nombre,
+          nombre: chat.nombre,
           telefono: jid.split('@')[0],
-          source:   'privado_whatsapp'
+          source: 'privado_whatsapp'
         });
+        
         chat.numerosReservados = asignacion.numeros;
         this.state.stats.sales++;
         this.io.emit('stats-update', this.state.stats);
-        return this.responses.generate({
-          jid, mensaje: text, sorteo, perfil, isGroup,
-          accion: 'CIERRE_PRIVADO',
-          datosExtra: { numeros: asignacion.numeros, total: asignacion.total, cantidad }
+        
+        return this.responses.cierrePrivado({
+          nombre: chat.nombre,
+          cantidad,
+          numeros: asignacion.numeros,
+          sorteo,
+          total: asignacion.total
         });
       }
 
-      // ── Persuasión / dudas / info ────────────
+      case 'PERSUASION_PRIVADO':
+        return this.responses.persuasion({ sorteo, perfil, entities });
+
+      case 'INFORMACION_GRUPO':
+        return this.responses.infoGrupo({ sorteo, perfil });
+
+      case 'NO_INSISTIR':
+        return this.responses.despedidaAmable();
+
       default:
-        return this.responses.generate({
-          jid, mensaje: text, sorteo, perfil, isGroup,
-          accion: accionRecomendada
-        });
+        if (/^1$|^ver|^números|^numeros/i.test(text)) {
+          return this.responses.verNumeros(sorteo);
+        }
+        if (/^2$|^comprar|^quiero/i.test(text)) {
+          return this.responses.menuCompra(sorteo);
+        }
+        if (/^3$|^promo|^oferta/i.test(text)) {
+          return this.responses.promociones(sorteo);
+        }
+        
+        return this.responses.bienvenida({ sorteo, perfil });
     }
   }
 
-  // ─────────────────────────────────────────────
-  //  Enviar con simulación de escritura humana
-  // ─────────────────────────────────────────────
-  async enviarRespuesta(jid, texto, isGroup, msgLength = 50) {
+  async enviarRespuesta(jid, texto, isGroup) {
     try {
-      const typingMs = antiBan.getTypingDelay(msgLength);
-      await typingSimulation(this.sock, jid, typingMs);
-      await humanDelay(300, 800);
+      // Simular escritura humana
+      await typingSimulation(this.sock, jid, 1500 + Math.random() * 2000);
+      
+      // Delay natural
+      await humanDelay(500, 1500);
+      
+      // ✅ BUG #4 FIX: antes era { text } — 'text' no existe en este scope, el parámetro es 'texto'
+      // Causaba que todos los mensajes enviados fueran undefined/vacíos
       await this.sock.sendMessage(jid, { text: texto });
+      
       await this.firebase.logMessage('outgoing', jid.split('@')[0], texto, true);
+      
     } catch (err) {
-      console.error('❌ Error enviando:', err);
+      console.error('Error enviando:', err);
       await this.firebase.logMessage('outgoing', jid.split('@')[0], texto, false);
     }
   }
 
-  // ─────────────────────────────────────────────
-  //  Actualizar bandeja del panel
-  // ─────────────────────────────────────────────
   updateChatUI(jid, nombre, mensaje, tipo) {
     const chat = this.activeChats.get(jid) || { jid, nombre, messages: [] };
     chat.messages = chat.messages.slice(-49);
     chat.messages.push({
-      id:        Date.now(),
+      id: Date.now(),
       nombre,
-      mensaje:   mensaje.substring(0, 200),
+      mensaje: mensaje.substring(0, 200),
       tipo,
       timestamp: new Date().toISOString()
     });
+    
     this.activeChats.set(jid, chat);
-
     this.state.chats.set(jid, {
       jid,
-      nombre:      chat.nombre,
-      tipo:        chat.tipo,
+      nombre: chat.nombre,
+      tipo: chat.tipo,
       lastMessage: mensaje.substring(0, 50),
-      unread:      tipo === 'incoming'
-                     ? (this.state.chats.get(jid)?.unread || 0) + 1
-                     : 0,
-      timestamp:   Date.now()
+      unread: tipo === 'incoming' ? (this.state.chats.get(jid)?.unread || 0) + 1 : 0,
+      timestamp: Date.now()
     });
-
+    
     this.io.emit('chats-update', Array.from(this.state.chats.values()));
   }
 
-  // Invalidar cache de grupos (útil al reconectar)
-  resetGroupCache() {
-    this.adminGroups.clear();
-    this.checkedGroups.clear();
+  async reactivarGrupos() {
+    const grupos = Array.from(this.activeChats.entries())
+      .filter(([jid, chat]) => jid.endsWith('@g.us') && 
+        Date.now() - chat.lastActivity > 4 * 60 * 60 * 1000);
+
+    for (const [jid, chat] of grupos) {
+      const check = antiBan.canSend(jid, true);
+      if (!check.allowed) continue;
+
+      const sorteos = await this.firebase.getSorteosActivos();
+      const msg = this.responses.reactivacionGrupo({ sorteo: sorteos[0] });
+      
+      await this.enviarRespuesta(jid, msg, true);
+      antiBan.registerSend(jid, true);
+      
+      await new Promise(r => setTimeout(r, antiBan.getInterval()));
+    }
   }
 }
 
