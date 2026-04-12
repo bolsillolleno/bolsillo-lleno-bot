@@ -1,16 +1,16 @@
-const IntentDetector    = require('./intents');
+const IntentDetector      = require('./intents');
 const SegmentacionService = require('./segmentacion.js');
-const SorteosService    = require('./sorteos');
-const Responses         = require('./responses');
-const antiBan           = require('./antiBan');
+const SorteosService      = require('./sorteos');
+const Responses           = require('./responses');
+const antiBan             = require('./antiBan');
 const { humanDelay, typingSimulation } = require('./delay');
 
 class BotLogic {
   constructor(sock, state, firebase, io) {
-    this.sock     = sock;
-    this.state    = state;
-    this.firebase = firebase;
-    this.io       = io;
+    this.sock           = sock;
+    this.state          = state;
+    this.firebase       = firebase;
+    this.io             = io;
     this.intentDetector = new IntentDetector();
     this.segmentacion   = new SegmentacionService(firebase);
     this.sorteos        = new SorteosService(firebase);
@@ -30,17 +30,13 @@ class BotLogic {
 
     this.updateChatUI(jid, pushName, text, 'incoming');
 
-    // 1. Anti-Ban
     const banCheck = antiBan.canSend(jid, isGroup);
     if (!banCheck.allowed) {
       console.log(`[ANTI-BAN] Bloqueado ${jid}: ${banCheck.reason}`);
       return;
     }
 
-    // 2. Segmentación
-    const perfil = await this.segmentacion.clasificarUsuario(jid, pushName, text);
-
-    // 3. Intención
+    const perfil  = await this.segmentacion.clasificarUsuario(jid, pushName, text);
     const contexto = {
       isGroup,
       mentioned:   this.isMentioned(msg, jid),
@@ -51,7 +47,6 @@ class BotLogic {
 
     console.log(`[BOT] ${pushName} | ${jid} | Tipo: ${perfil.tipo} | Intención: ${analisis.intencion} | Acción: ${analisis.accionRecomendada}`);
 
-    // 4. Ejecutar acción
     const respuesta = await this.ejecutarAccion(analisis, jid, text, perfil, msg, isGroup);
 
     if (respuesta) {
@@ -59,7 +54,6 @@ class BotLogic {
       this.updateChatUI(jid, 'Bot', respuesta, 'outgoing');
     }
 
-    // 5. Registrar anti-ban
     antiBan.registerSend(jid, isGroup);
   }
 
@@ -80,11 +74,11 @@ class BotLogic {
     if (!this.activeChats.has(jid)) {
       this.activeChats.set(jid, {
         jid,
-        nombre:           perfil.data?.nombre || msg.pushName,
-        tipo:             perfil.tipo,
-        intencionActual:  intencion,
+        nombre:            perfil.data?.nombre || msg.pushName,
+        tipo:              perfil.tipo,
+        intencionActual:   intencion,
         numerosReservados: [],
-        startTime:        Date.now()
+        startTime:         Date.now()
       });
     }
     const chat = this.activeChats.get(jid);
@@ -96,9 +90,7 @@ class BotLogic {
       case 'CIERRE_GRUPO': {
         if (entities.cantidad && entities.cantidad <= 3) {
           const asignacion = await this.sorteos.asignarNumeros(sorteo.id, entities.cantidad, {
-            nombre:   chat.nombre,
-            telefono: jid.split('@')[0],
-            source:   'grupo_whatsapp'
+            nombre: chat.nombre, telefono: jid.split('@')[0], source: 'grupo_whatsapp'
           });
           chat.numerosReservados = asignacion.numeros;
           return this.responses.cierreGrupo({
@@ -112,9 +104,7 @@ class BotLogic {
       case 'CIERRE_PRIVADO': {
         const cantidad   = entities.cantidad || 1;
         const asignacion = await this.sorteos.asignarNumeros(sorteo.id, cantidad, {
-          nombre:   chat.nombre,
-          telefono: jid.split('@')[0],
-          source:   'privado_whatsapp'
+          nombre: chat.nombre, telefono: jid.split('@')[0], source: 'privado_whatsapp'
         });
         chat.numerosReservados = asignacion.numeros;
         this.state.stats.sales++;
@@ -135,9 +125,9 @@ class BotLogic {
         return this.responses.despedidaAmable();
 
       default:
-        if (/^1$|^ver|^números|^numeros/i.test(text))  return this.responses.verNumeros(sorteo);
-        if (/^2$|^comprar|^quiero/i.test(text))        return this.responses.menuCompra(sorteo);
-        if (/^3$|^promo|^oferta/i.test(text))          return this.responses.promociones(sorteo);
+        if (/^1$|^ver|^números|^numeros/i.test(text)) return this.responses.verNumeros(sorteo);
+        if (/^2$|^comprar|^quiero/i.test(text))       return this.responses.menuCompra(sorteo);
+        if (/^3$|^promo|^oferta/i.test(text))         return this.responses.promociones(sorteo);
         return this.responses.bienvenida({ sorteo, perfil });
     }
   }
@@ -147,10 +137,11 @@ class BotLogic {
       await typingSimulation(this.sock, jid, 1500 + Math.random() * 2000);
       await humanDelay(500, 1500);
 
-      // ✅ BUG #4 CORREGIDO: era { text } (variable inexistente → undefined).
-      // El mensaje se "enviaba" con contenido vacío y WhatsApp lo descartaba silenciosamente.
+      // ✅ FIX #4: era { text } — variable inexistente → mensaje undefined/vacío.
+      // WhatsApp recibe el mensaje vacío y lo descarta silenciosamente.
       await this.sock.sendMessage(jid, { text: texto });
 
+      // ✅ FIX #5: stats.sent nunca se incrementaba
       this.state.stats.sent++;
       this.io.emit('stats-update', this.state.stats);
 
@@ -158,6 +149,7 @@ class BotLogic {
 
     } catch (err) {
       console.error('Error enviando:', err);
+      // ✅ FIX #5: stats.errors nunca se incrementaba
       this.state.stats.errors++;
       this.io.emit('stats-update', this.state.stats);
       await this.firebase.logMessage('outgoing', jid.split('@')[0], texto, false);
@@ -168,8 +160,7 @@ class BotLogic {
     const chat = this.activeChats.get(jid) || { jid, nombre, messages: [] };
     chat.messages = chat.messages.slice(-49);
     chat.messages.push({
-      id:        Date.now(),
-      nombre,
+      id: Date.now(), nombre,
       mensaje:   mensaje.substring(0, 200),
       tipo,
       timestamp: new Date().toISOString()
@@ -190,7 +181,6 @@ class BotLogic {
     const grupos = Array.from(this.activeChats.entries())
       .filter(([jid, chat]) => jid.endsWith('@g.us') &&
         Date.now() - chat.startTime > 4 * 60 * 60 * 1000);
-
     for (const [jid] of grupos) {
       const check = antiBan.canSend(jid, true);
       if (!check.allowed) continue;
