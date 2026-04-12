@@ -15,6 +15,8 @@ class BotLogic {
     this.segmentacion = new SegmentacionService(firebase);
     this.sorteos = new SorteosService(firebase);
     this.responses = new Responses(firebase);
+    
+    // Cache de conversaciones activas
     this.activeChats = new Map();
   }
 
@@ -28,16 +30,20 @@ class BotLogic {
     
     if (!text) return;
 
+    // Actualizar UI en tiempo real
     this.updateChatUI(jid, pushName, text, 'incoming');
 
+    // 1. Verificar Anti-Ban
     const banCheck = antiBan.canSend(jid, isGroup);
     if (!banCheck.allowed) {
       console.log(`[ANTI-BAN] Bloqueado ${jid}: ${banCheck.reason}`);
       return;
     }
 
+    // 2. Segmentación del usuario
     const perfil = await this.segmentacion.clasificarUsuario(jid, pushName, text);
     
+    // 3. Análisis de intención
     const contexto = { 
       isGroup, 
       mentioned: this.isMentioned(msg, jid), 
@@ -48,9 +54,7 @@ class BotLogic {
 
     console.log(`[BOT] ${pushName} | ${jid} | Tipo: ${perfil.tipo} | Intención: ${analisis.intencion} | Acción: ${analisis.accionRecomendada}`);
 
-    // En grupos: solo responder si el bot fue mencionado
-    if (isGroup && !analisis.requiereRespuesta) return;
-
+    // 4. Ejecutar acción
     const respuesta = await this.ejecutarAccion(analisis, jid, text, perfil, msg, isGroup);
     
     if (respuesta) {
@@ -58,6 +62,7 @@ class BotLogic {
       this.updateChatUI(jid, 'Bot', respuesta, 'outgoing');
     }
 
+    // 5. Registrar para anti-ban
     antiBan.registerSend(jid, isGroup);
   }
 
@@ -75,6 +80,7 @@ class BotLogic {
 
     if (!sorteo) return "⏰ *No hay sorteos activos en este momento.*\n\nTe aviso en cuanto abramos uno nuevo 🍀";
 
+    // GUARDAR/ACTUALIZAR CHAT ACTIVO
     if (!this.activeChats.has(jid)) {
       this.activeChats.set(jid, {
         jid, 
@@ -91,11 +97,7 @@ class BotLogic {
       case 'IGNORAR':
         return null;
 
-      // ✅ NUEVO: caso para saludos y contactos nuevos
-      case 'BIENVENIDA':
-        return this.responses.bienvenida({ sorteo, perfil });
-
-      case 'CIERRE_GRUPO':
+      case 'CIERRE_GRUPO': {
         if (entities.cantidad && entities.cantidad <= 3) {
           const asignacion = await this.sorteos.asignarNumeros(sorteo.id, entities.cantidad, {
             nombre: chat.nombre,
@@ -112,6 +114,7 @@ class BotLogic {
           });
         }
         return this.responses.infoGrupo({ sorteo, perfil });
+      }
 
       case 'CIERRE_PRIVADO': {
         const cantidad = entities.cantidad || 1;
@@ -142,24 +145,39 @@ class BotLogic {
         return this.responses.despedidaAmable();
 
       default:
-        if (/^1$|^ver|^números|^numeros/i.test(text)) return this.responses.verNumeros(sorteo);
-        if (/^2$|^comprar|^quiero/i.test(text)) return this.responses.menuCompra(sorteo);
-        if (/^3$|^promo|^oferta/i.test(text)) return this.responses.promociones(sorteo);
+        if (/^1$|^ver|^números|^numeros/i.test(text)) {
+          return this.responses.verNumeros(sorteo);
+        }
+        if (/^2$|^comprar|^quiero/i.test(text)) {
+          return this.responses.menuCompra(sorteo);
+        }
+        if (/^3$|^promo|^oferta/i.test(text)) {
+          return this.responses.promociones(sorteo);
+        }
         return this.responses.bienvenida({ sorteo, perfil });
     }
   }
 
   async enviarRespuesta(jid, texto, isGroup) {
     try {
+      // Simular escritura humana
       await typingSimulation(this.sock, jid, 1500 + Math.random() * 2000);
+      
+      // Delay natural
       await humanDelay(500, 1500);
       
-      // ✅ BUG #4 FIX: era { text } → 'text' undefined. Corregido a { text: texto }
+      // ✅ BUG #1 CORREGIDO: era { text } (undefined). Ahora { text: texto }
       await this.sock.sendMessage(jid, { text: texto });
       
+      this.state.stats.sent++;
+      this.io.emit('stats-update', this.state.stats);
+
       await this.firebase.logMessage('outgoing', jid.split('@')[0], texto, true);
+      
     } catch (err) {
       console.error('Error enviando:', err);
+      this.state.stats.errors++;
+      this.io.emit('stats-update', this.state.stats);
       await this.firebase.logMessage('outgoing', jid.split('@')[0], texto, false);
     }
   }
@@ -188,15 +206,16 @@ class BotLogic {
 
   async reactivarGrupos() {
     const grupos = Array.from(this.activeChats.entries())
-      .filter(([jid]) => jid.endsWith('@g.us') && 
-        Date.now() - (this.activeChats.get(jid)?.startTime || 0) > 4 * 60 * 60 * 1000);
+      .filter(([jid, chat]) => jid.endsWith('@g.us') && 
+        Date.now() - chat.startTime > 4 * 60 * 60 * 1000);
 
     for (const [jid] of grupos) {
       const check = antiBan.canSend(jid, true);
       if (!check.allowed) continue;
       const sorteos = await this.firebase.getSorteosActivos();
-      const msgText = this.responses.reactivacionGrupo({ sorteo: sorteos[0] });
-      await this.enviarRespuesta(jid, msgText, true);
+      if (!sorteos[0]) continue;
+      const msg = this.responses.reactivacionGrupo({ sorteo: sorteos[0] });
+      await this.enviarRespuesta(jid, msg, true);
       antiBan.registerSend(jid, true);
       await new Promise(r => setTimeout(r, antiBan.getInterval()));
     }
