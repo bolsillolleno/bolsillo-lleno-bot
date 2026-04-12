@@ -1,7 +1,7 @@
-// ✅ BUG #7 CORREGIDO: rutas de require incorrectas
-// Antes: require('../utils/antiBan') y require('../utils/delay') → crash porque
-// esos archivos están en la raíz del proyecto, no en una carpeta utils/
-const antiBan       = require('./antiBan');
+// ✅ FIX #9: rutas corregidas — antes '../utils/antiBan' y '../utils/delay'
+// → Error: Cannot find module (no existe carpeta utils/)
+// Los archivos están en la raíz del proyecto
+const antiBan        = require('./antiBan');
 const { humanDelay } = require('./delay');
 
 class MessageQueue {
