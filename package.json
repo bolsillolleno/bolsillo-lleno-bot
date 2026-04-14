@@ -1,7 +1,7 @@
 {
   "name": "bolsillo-lleno-wa-bot",
-  "version": "1.0.0",
-  "description": "WhatsApp Bot — Bol$illo Lleno",
+  "version": "2.0.0",
+  "description": "WhatsApp Bot con IA — Bol$illo Lleno",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -11,6 +11,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.27.0",
     "@whiskeysockets/baileys": "^6.7.9",
     "express": "^4.18.2",
     "firebase-admin": "^12.0.0",

@@ -2,7 +2,6 @@
 const admin = require('./firebase');
 const { DateTime } = require('luxon');
 
-// Nodo en Realtime DB donde se guarda la sesión de WhatsApp
 const SESSION_REF = 'wa_session';
 
 class FirebaseService {
@@ -12,21 +11,18 @@ class FirebaseService {
   }
 
   // ════════════════════════════════════════════
-  //  SESIÓN BAILEYS (nueva)
+  //  SESIÓN BAILEYS
   // ════════════════════════════════════════════
 
-  /** Devuelve { filename__DOT__json: base64, ... } o null si no existe */
   async getSession() {
     const snap = await this.db.ref(SESSION_REF).once('value');
     return snap.val() || null;
   }
 
-  /** Guarda el objeto de sesión { filename__DOT__json: base64, ... } */
   async saveSession(payload) {
     await this.db.ref(SESSION_REF).set(payload);
   }
 
-  /** Borra la sesión completa (logout) */
   async deleteSession() {
     await this.db.ref(SESSION_REF).remove();
   }
@@ -38,11 +34,23 @@ class FirebaseService {
   async getSorteosActivos() {
     const snapshot = await this.db.ref('sorteos').once('value');
     const data     = snapshot.val() || {};
-    const ahora    = DateTime.now().toISO();
+    const ahora    = DateTime.now();
 
     return Object.entries(data)
-      .filter(([_, s]) => s.date > ahora)
-      .map(([id, s]) => ({ id, ...s }));
+      .filter(([_, s]) => {
+        // ✅ FIX #11 — comparar objetos DateTime, no strings ISO
+        // Maneja zonas horarias y offsets correctamente
+        try {
+          return DateTime.fromISO(s.date) > ahora;
+        } catch {
+          return false; // fecha inválida → excluir
+        }
+      })
+      .map(([id, s]) => ({ id, ...s }))
+      .sort((a, b) => {
+        // Ordenar por fecha ascendente (el más próximo primero)
+        return DateTime.fromISO(a.date) - DateTime.fromISO(b.date);
+      });
   }
 
   async getNumerosSorteo(sorteoId) {
@@ -51,8 +59,8 @@ class FirebaseService {
       this.db.ref(`pending/${sorteoId}`).once('value')
     ]);
 
-    const occupied  = occupiedSnap.val() || {};
-    const pending   = pendingSnap.val() || {};
+    const occupied = occupiedSnap.val() || {};
+    const pending  = pendingSnap.val() || {};
 
     return {
       occupied,
@@ -90,17 +98,31 @@ class FirebaseService {
   }
 
   // ════════════════════════════════════════════
+  //  INTERACCIONES (para segmentación)
+  // ════════════════════════════════════════════
+
+  async getInteracciones(phone) {
+    const snap = await this.db.ref(`interacciones/${phone}`).once('value');
+    return snap.val() || { count: 0 };
+  }
+
+  // ════════════════════════════════════════════
   //  LOGS ANTI-BAN
   // ════════════════════════════════════════════
 
   async logMessage(tipo, telefono, contenido, exito) {
-    await this.firestore.collection('logs_whatsapp').add({
-      tipo,
-      telefono,
-      contenido: contenido.substring(0, 100),
-      exito,
-      timestamp: admin.firestore.FieldValue.serverTimestamp()
-    });
+    try {
+      await this.firestore.collection('logs_whatsapp').add({
+        tipo,
+        telefono,
+        contenido: (contenido || '').substring(0, 100),
+        exito,
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } catch (err) {
+      // No crashear el bot si falla el log
+      console.error('[FIREBASE] Error al logear mensaje:', err.message);
+    }
   }
 }
 

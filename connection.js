@@ -7,31 +7,29 @@ const {
   fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 
-const P       = require('pino');
-const QRCode  = require('qrcode');
-const fs      = require('fs');
-const path    = require('path');
-
-// ✅ FIX #1: importar MessageListener (antes nunca se instanciaba → bot sordo)
-const MessageListener = require('./listener');
+const P = require('pino');
+const QRCode = require('qrcode');
+const fs = require('fs');
+const path = require('path');
 
 const SESSION_DIR = path.join(process.cwd(), 'auth_info');
 
 class WhatsAppConnection {
   constructor(io, state, firebase) {
-    this.io         = io;
-    this.state      = state;
-    this.firebase   = firebase;
-    this.sock       = null;
+    this.io = io;
+    this.state = state;
+    this.firebase = firebase;
+    this.sock = null;
     this.retryCount = 0;
-    this.listener   = null;
   }
 
-  async connect() {
+  // ✅ FIX #4 — forceNew=false por defecto: NO borra sesión en reconexiones normales
+  async connect(forceNew = false) {
     try {
-      // ✅ FIX #2: ELIMINADO el fs.rmSync aquí.
-      // Antes borraba auth_info en CADA connect() incluyendo reconexiones → loop QR infinito.
-      // Ahora solo se borra en logout real (abajo) o llamando reconnectFresh() manualmente.
+      if (forceNew && fs.existsSync(SESSION_DIR)) {
+        fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+        console.log('🧹 Sesión eliminada — generando QR limpio');
+      }
 
       const { state: authState, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
       const { version } = await fetchLatestBaileysVersion();
@@ -52,41 +50,12 @@ class WhatsAppConnection {
         fireInitQueries: true
       });
 
-      // ✅ FIX #1: instanciar listener AQUÍ con el socket recién creado.
-      // Sin esta línea el bot estaba "en línea" pero NUNCA procesaba ningún mensaje.
-      this.listener = new MessageListener(this.sock, this.state, this.firebase, this.io);
-
       this.setupListeners(saveCreds);
 
     } catch (err) {
       console.error('❌ Error conexión:', err);
       this.handleReconnect();
     }
-  }
-
-  // ✅ FIX #3: métodos públicos que server.js necesita y no existían → crash
-  async sendMessage(jid, text) {
-    if (!this.sock) throw new Error('Socket no inicializado');
-    return this.sock.sendMessage(jid, { text });
-  }
-
-  async reconnectFresh() {
-    if (fs.existsSync(SESSION_DIR)) {
-      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-      console.log('🧹 Sesión eliminada para reconexión limpia');
-    }
-    this.retryCount = 0;
-    await this.connect();
-  }
-
-  disconnect() {
-    if (this.sock) {
-      this.sock.end(new Error('Desconexión manual'));
-      this.sock = null;
-    }
-    this.listener = null;
-    this.state.connection = 'disconnected';
-    this.io.emit('connection-status', 'disconnected');
   }
 
   setupListeners(saveCreds) {
@@ -101,46 +70,66 @@ class WhatsAppConnection {
 
       if (qr) {
         console.log('📲 QR generado');
-        this.state.qrCode     = qr;
+        this.state.qrCode = qr;
         this.state.connection = 'qr';
         this.io.emit('connection-status', 'qr');
+
         QRCode.toDataURL(qr, (err, url) => {
           if (!err) this.io.emit('qr-code', url);
         });
       }
 
       if (connection === 'close') {
-        const code      = lastDisconnect?.error?.output?.statusCode;
+        const code = lastDisconnect?.error?.output?.statusCode;
         const loggedOut = code === DisconnectReason.loggedOut;
 
         if (loggedOut) {
-          console.log('🔴 Sesión cerrada — requiere nuevo QR');
+          console.log('🔴 Sesión cerrada');
           this.state.connection = 'disconnected';
           this.io.emit('connection-status', 'disconnected');
-          // Solo en logout real limpiamos la sesión guardada
-          if (fs.existsSync(SESSION_DIR)) {
-            fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-          }
         } else {
           this.handleReconnect();
         }
 
       } else if (connection === 'open') {
-        console.log('✅ WhatsApp Conectado — Listener activo 🟢');
+        console.log('✅ WhatsApp Conectado');
         this.state.connection = 'connected';
-        this.state.qrCode     = null;
-        this.retryCount       = 0;
+        this.state.qrCode = null;
+        this.retryCount = 0;
         this.io.emit('connection-status', 'connected');
       }
     });
   }
 
+  // ✅ FIX #3 — sendMessage expuesto para que server.js pueda usarlo
+  async sendMessage(jid, text) {
+    if (!this.sock) throw new Error('WhatsApp no conectado');
+    return await this.sock.sendMessage(jid, { text });
+  }
+
+  // ✅ FIX #3 — reconnectFresh para panel: sí borra sesión y pide QR nuevo
+  reconnectFresh() {
+    this.retryCount = 0;
+    this.connect(true); // forceNew = true → borra sesión
+  }
+
+  // ✅ FIX #3 — disconnect limpio
+  disconnect() {
+    if (this.sock) {
+      try { this.sock.end(); } catch (_) {}
+      this.sock = null;
+    }
+    this.state.connection = 'disconnected';
+    this.state.qrCode = null;
+    this.io.emit('connection-status', 'disconnected');
+    console.log('🔌 WhatsApp desconectado manualmente');
+  }
+
   handleReconnect() {
     this.retryCount++;
     const delay = Math.min(1000 * 2 ** this.retryCount, 30000);
-    console.log(`🔄 Reconectando en ${delay / 1000}s... (intento #${this.retryCount})`);
-    // connect() ya NO borra sesión → la reconexión preserva las credenciales
-    setTimeout(() => this.connect(), delay);
+    console.log(`🔄 Reconectando en ${delay / 1000}s...`);
+    setTimeout(() => this.connect(), delay); // forceNew=false → preserva sesión
   }
 }
 
