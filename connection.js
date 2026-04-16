@@ -12,6 +12,8 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 
+const MessageListener = require('./listener'); // ✅ FIX — importar listener
+
 const SESSION_DIR = path.join(process.cwd(), 'auth_info');
 
 class WhatsAppConnection {
@@ -97,6 +99,9 @@ class WhatsAppConnection {
         this.state.qrCode = null;
         this.retryCount = 0;
         this.io.emit('connection-status', 'connected');
+
+        // ✅ FIX — activar listener de mensajes entrantes
+        new MessageListener(this.sock, this.state, this.firebase, this.io);
       }
     });
   }
