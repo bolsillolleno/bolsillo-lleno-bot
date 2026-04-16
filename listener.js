@@ -32,6 +32,8 @@ class MessageListener {
 
         // ✅ Regla de oro #1: registrar que este contacto nos escribió
         antiBan.registerIncoming(jid);
+        this.state.stats.received++;
+        this.io.emit('stats-update', this.state.stats);
 
         // Guardar en Firebase bandeja (para el panel)
         const text = (
@@ -79,29 +81,40 @@ class MessageListener {
 
   // ── Controles del panel via Socket.IO ───────────
   setupSocketControls() {
-    this.io.on('connection', (socket) => {
+    // Registrar en sockets ya conectados (evita duplicados en reconexiones)
+    this.io.sockets.sockets.forEach(socket => this._registerSocketControls(socket));
+    this.io.on('connection', socket => this._registerSocketControls(socket));
+  }
 
-      // Lanzar outreach desde el panel
-      socket.on('outreach-launch', async (opciones) => {
-        console.log('🚀 Outreach lanzado desde panel:', opciones);
-        const result = await this.outreach.launch(opciones);
-        socket.emit('outreach-result', result);
-      });
+  _registerSocketControls(socket) {
+    // Evitar registrar más de una vez por socket
+    if (socket._bolsilloControlsRegistered) return;
+    socket._bolsilloControlsRegistered = true;
 
-      // Detener outreach
-      socket.on('outreach-stop', () => {
-        this.outreach.stop();
-      });
+    // Lanzar outreach desde el panel
+    socket.on('outreach-launch', async (opciones) => {
+      console.log('🚀 Outreach lanzado desde panel:', opciones);
+      const result = await this.outreach.launch(opciones);
+      socket.emit('outreach-result', result);
+    });
 
-      // Obtener grupos admin (para mostrar en panel)
-      socket.on('get-admin-groups', async () => {
-        const groups = await this.outreach.getAdminGroups();
-        socket.emit('admin-groups', groups.map(g => ({
-          jid:      g.jid,
-          name:     g.name,
-          members:  g.participants.length
-        })));
-      });
+    // Detener outreach
+    socket.on('outreach-stop', () => {
+      this.outreach.stop();
+    });
+
+    // Obtener grupos admin (para mostrar en panel)
+    socket.on('get-admin-groups', async () => {
+      const groups = await this.outreach.getAdminGroups();
+      socket.emit('admin-groups', groups.map(g => ({
+        jid:      g.jid,
+        name:     g.name,
+        members:  g.participants.length,
+        participants: g.participants.map(p => ({
+          id: p.id,
+          admin: p.admin || null
+        }))
+      })));
     });
   }
 }
