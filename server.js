@@ -39,7 +39,9 @@ app.get('/', (req, res) => res.json({
 
 app.get('/health', (req, res) => res.json({
   status: 'ok', connection: state.connection,
-  botActive: state.botActive, uptime: process.uptime(), stats: state.stats
+  botActive: state.botActive, uptime: process.uptime(),
+  ia: !!process.env.ANTHROPIC_API_KEY,
+  stats: state.stats
 }));
 
 app.get('/status', (req, res) => res.json({
