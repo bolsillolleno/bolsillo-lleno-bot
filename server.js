@@ -2,6 +2,7 @@ const express = require('express');
 const http    = require('http');
 const { Server } = require('socket.io');
 const QRCode  = require('qrcode');
+const cors    = require('cors'); // ✅ FIX CORS
 
 const WhatsAppConnection = require('./connection');
 const FirebaseService    = require('./firebaseServices');
@@ -10,6 +11,7 @@ const ai                 = require('./ai'); // IA para endpoints del panel
 const PORT = process.env.PORT || 8080;
 const app    = express();
 const server = http.createServer(app);
+app.use(cors());           // ✅ FIX CORS — antes de todas las rutas
 app.use(express.json());
 
 const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
