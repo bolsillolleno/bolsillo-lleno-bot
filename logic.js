@@ -200,6 +200,8 @@ class BotLogic {
       await typingSimulation(this.sock, jid, 1500 + Math.random() * 2000);
       await humanDelay(500, 1500);
       await this.sock.sendMessage(jid, { text: texto }); // ✅ FIX #2
+      this.state.stats.sent++;
+      this.io.emit('stats-update', this.state.stats);
       await this.firebase.logMessage('outgoing', jid.split('@')[0], texto, true);
     } catch (err) {
       console.error('[BOT] Error enviando:', err);
